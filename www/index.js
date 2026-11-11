@@ -1,0 +1,2275 @@
+import * as monaco from 'monaco-editor';
+import { validateInstance, isCborSupported } from './src/instance-validation.js';
+import {
+  buildShareUrl,
+  readStateFromLocation,
+  clearLocationState,
+  copyToClipboard,
+  isTooLargeToShare,
+} from './src/share.js';
+import { pickFile, downloadText, attachDropZone, classifyFile, bytesToHex } from './src/file-io.js';
+import { parseRules, renderOutline, registerNavigation } from './src/outline.js';
+import { generateSample, listRootCandidates } from './src/sample-gen.js';
+import { initToasts, toast } from './src/toast.js';
+import { initShortcutsModal } from './src/shortcuts.js';
+import { buildSuggestions, completionContext } from './src/cddl-completion.js';
+import { logFailure, logStorageUnavailable } from './src/logger.js';
+
+/**
+ * @typedef {import('./src/types.js').Diagnostic} Diagnostic
+ * @typedef {import('./src/share.js').PlaygroundState} PlaygroundState
+ * @typedef {import('monaco-editor').editor.IStandaloneCodeEditor} Editor
+ */
+// ─── CDDL Language Registration ───────────────────────────────────────────────
+
+monaco.languages.register({
+  id: 'cddl',
+  extensions: ['.cddl'],
+  aliases: ['CDDL', 'cddl'],
+  mimetypes: ['text/cddl'],
+});
+
+monaco.languages.setMonarchTokensProvider('cddl', {
+  tokenizer: {
+    root: [
+      [/;.*$/, 'comment'],
+      [
+        /\b(any|integer|uint|nint|int|bstr|bytes|tstr|text|tdate|time|number|biguint|bignint|bigint|unsigned|decfrac|bigfloat|eb64url|eb64legacy|eb16|encoded-cbor|uri|b64url|b64legacy|regexp|mime-message|cbor-any|float16|float32|float64|float16-32|float32-64|float|false|true|bool|nil|null|undefined)\b/,
+        'keyword',
+      ],
+      [/\b\d+(\.\d+)?([eE][+-]?\d+)?\b/, 'number'],
+      [/#\w+/, 'number'],
+      [/"([^"\\]|\\.)*$/, 'string.invalid'],
+      [/"/, 'string', '@string'],
+      [/'([^'\\]|\\.)*$/, 'string.invalid'],
+      [/'/, 'string', '@stringSingle'],
+      [/(=|\/\/=|\/=)/, 'operator'],
+      [/(=>|:|\^|\?|\+|\*|\/\/|\/)/, 'operator'],
+      [
+        /\.(size|bits|regexp|pcre|cbor|cborseq|within|and|lt|le|gt|ge|eq|ne|default)/,
+        'keyword.operator',
+      ],
+      [/\.\.\./, 'operator'],
+      [/\.\./, 'operator'],
+      [/\$\$/, 'keyword.operator'],
+      [/\$/, 'keyword.operator'],
+      [/[a-zA-Z_][\w-]*/, 'identifier'],
+      [/[[\]]/, 'bracket.square'],
+      [/[{}]/, 'bracket.curly'],
+      [/[()]/, 'bracket.parenthesis'],
+      [/[<>]/, 'bracket.angle'],
+      [/,/, 'delimiter'],
+      [/[ \t\r\n]+/, 'white'],
+    ],
+    string: [
+      [/[^\\"]+/, 'string'],
+      [/\\./, 'string.escape.invalid'],
+      [/"/, 'string', '@pop'],
+    ],
+    stringSingle: [
+      [/[^\\']+/, 'string'],
+      [/\\./, 'string.escape.invalid'],
+      [/'/, 'string', '@pop'],
+    ],
+  },
+});
+
+// Dark theme tuned for the playground
+monaco.editor.defineTheme('cddl-dark', {
+  base: 'vs-dark',
+  inherit: true,
+  rules: [
+    { token: 'comment', foreground: '6A9955', fontStyle: 'italic' },
+    { token: 'keyword', foreground: 'C586C0', fontStyle: 'bold' },
+    { token: 'keyword.operator', foreground: 'D16969' },
+    { token: 'operator', foreground: 'D4D4D4' },
+    { token: 'number', foreground: 'B5CEA8' },
+    { token: 'string', foreground: 'CE9178' },
+    { token: 'string.invalid', foreground: 'F44747' },
+    { token: 'string.escape.invalid', foreground: 'F44747' },
+    { token: 'identifier', foreground: '9CDCFE' },
+    { token: 'bracket.square', foreground: 'FFD700' },
+    { token: 'bracket.curly', foreground: 'DA70D6' },
+    { token: 'bracket.parenthesis', foreground: '569CD6' },
+    { token: 'bracket.angle', foreground: '4EC9B0' },
+    { token: 'delimiter', foreground: '808080' },
+  ],
+  colors: {
+    'editor.background': '#0f1117',
+    'editor.foreground': '#e2e8f0',
+    'editor.lineHighlightBackground': '#1c1e2d',
+    'editor.selectionBackground': '#2a2d5e',
+    'editorCursor.foreground': '#6366f1',
+    'editorLineNumber.foreground': '#3a3f5c',
+    'editorLineNumber.activeForeground': '#6366f1',
+    'editor.inactiveSelectionBackground': '#1e2235',
+    'editorIndentGuide.background1': '#1e2030',
+    'editorIndentGuide.activeBackground1': '#2a2d3e',
+  },
+});
+
+// Light theme for the playground
+monaco.editor.defineTheme('cddl-light', {
+  base: 'vs',
+  inherit: true,
+  rules: [
+    { token: 'comment', foreground: '6a737d', fontStyle: 'italic' },
+    { token: 'keyword', foreground: 'd63384', fontStyle: 'bold' },
+    { token: 'keyword.operator', foreground: 'cf222e' },
+    { token: 'operator', foreground: '24292f' },
+    { token: 'number', foreground: '0550ae' },
+    { token: 'string', foreground: '0a3069' },
+    { token: 'string.invalid', foreground: 'cf222e' },
+    { token: 'string.escape.invalid', foreground: 'cf222e' },
+    { token: 'identifier', foreground: '0550ae' },
+    { token: 'bracket.square', foreground: 'e3b341' },
+    { token: 'bracket.curly', foreground: '8250df' },
+    { token: 'bracket.parenthesis', foreground: '0969da' },
+    { token: 'bracket.angle', foreground: '1a7f37' },
+    { token: 'delimiter', foreground: '57606a' },
+  ],
+  colors: {
+    'editor.background': '#f8f9fc',
+    'editor.foreground': '#1e293b',
+    'editor.lineHighlightBackground': '#f0f1f5',
+    'editor.selectionBackground': '#c8d1e0',
+    'editorCursor.foreground': '#4f46e5',
+    'editorLineNumber.foreground': '#94a3b8',
+    'editorLineNumber.activeForeground': '#4f46e5',
+    'editor.inactiveSelectionBackground': '#e8e9ef',
+    'editorIndentGuide.background1': '#e8e9ef',
+    'editorIndentGuide.activeBackground1': '#d4d6de',
+  },
+});
+
+// Autocomplete: rule/group names from the live buffer, the full RFC 8610
+// prelude, and control operators after a `.`.
+const COMPLETION_KIND = {
+  rule: () => monaco.languages.CompletionItemKind.Struct,
+  prelude: () => monaco.languages.CompletionItemKind.Keyword,
+  control: () => monaco.languages.CompletionItemKind.Operator,
+};
+
+monaco.languages.registerCompletionItemProvider('cddl', {
+  // `.` is not part of Monaco's default word pattern, so without this the
+  // provider is never invoked for control operators.
+  triggerCharacters: ['.'],
+  provideCompletionItems: (model, position) => {
+    const linePrefix = model.getValueInRange({
+      startLineNumber: position.lineNumber,
+      startColumn: 1,
+      endLineNumber: position.lineNumber,
+      endColumn: position.column,
+    });
+
+    const word = model.getWordUntilPosition(position);
+    let startColumn = word.startColumn;
+    if (completionContext(linePrefix) === 'control') {
+      // Extend the replaced range back over the leading `.` so inserting
+      // `.size` does not produce `..size`.
+      const dot = /\.[A-Za-z0-9-]*$/.exec(linePrefix);
+      if (dot) startColumn = dot.index + 1;
+    }
+    const range = {
+      startLineNumber: position.lineNumber,
+      endLineNumber: position.lineNumber,
+      startColumn,
+      endColumn: position.column,
+    };
+
+    const suggestions = buildSuggestions(model.getValue(), linePrefix).map((s) => ({
+      label: s.label,
+      kind: (COMPLETION_KIND[s.group] || COMPLETION_KIND.prelude)(),
+      insertText: s.insertText,
+      detail: s.detail,
+      documentation: s.documentation,
+      sortText: s.sortText,
+      range,
+    }));
+    return { suggestions };
+  },
+});
+
+// ─── WASM Module ──────────────────────────────────────────────────────────────
+
+/** @type {typeof import('../pkg/cddl.js') | undefined} */
+let wasmModule;
+
+async function initWasm() {
+  try {
+    const wasmImport = await import('../pkg/cddl.js');
+    await wasmImport.default();
+    wasmModule = wasmImport;
+    return typeof wasmModule.validate_cddl_from_str === 'function';
+  } catch (err) {
+    logFailure('wasm.load_failed', err);
+    return false;
+  }
+}
+
+// ─── Validation ───────────────────────────────────────────────────────────────
+//
+// All parsing and partial compilation is handled by the Rust WASM library.
+// `validate_cddl_from_str(input, check_refs)` returns an array of structured
+// diagnostics (empty = valid).  Each entry has:
+//   { position: { line, column, range, index },
+//     msg: { short, extended },
+//     severity: "error" | "warning" }
+//
+// We normalise each into: { line, column, range, message, category, severity }
+
+let checkRefs = false;
+const REFS_CACHE_KEY = 'cddl-playground-check-refs';
+
+let formatOnSave = false;
+const FORMAT_CACHE_KEY = 'cddl-playground-format-on-save';
+
+let isDark = true;
+const THEME_CACHE_KEY = 'cddl-playground-theme';
+
+// ─── Examples Library ─────────────────────────────────────────────────────────
+
+const EXAMPLES = [
+  {
+    category: 'Basics',
+    items: [
+      {
+        name: 'Hello World',
+        desc: 'Minimal schema with a single text rule',
+        source: `; The simplest possible CDDL schema
+greeting = text
+`,
+      },
+      {
+        name: 'Basic Types',
+        desc: 'Common CDDL primitive types',
+        source: `; Basic CDDL types
+name = text
+age = uint
+temperature = float
+active = bool
+identifier = bytes
+`,
+      },
+      {
+        name: 'Person Record',
+        desc: 'Map with required and optional fields',
+        source: `; A person record with optional fields
+person = {
+  name: text,
+  age: uint,
+  ? email: text,
+  ? phone: text,
+}
+`,
+      },
+      {
+        name: 'Arrays & Ranges',
+        desc: 'Array definitions and value constraints',
+        source: `; Arrays and value ranges
+color = &(red: 1, green: 2, blue: 3)
+
+percentage = 0.0..100.0
+
+rgb = [3 uint .size 1]
+
+palette = [+ color]
+
+scores = [* percentage]
+`,
+      },
+      {
+        name: 'Choice Types',
+        desc: 'Type alternatives using //',
+        source: `; Choice types (type unions)
+contact = phone-contact / email-contact / address-contact
+
+phone-contact = {
+  type: "phone",
+  number: text,
+}
+
+email-contact = {
+  type: "email",
+  address: text,
+}
+
+address-contact = {
+  type: "address",
+  street: text,
+  city: text,
+  country: text,
+}
+`,
+      },
+      {
+        name: 'Generics',
+        desc: 'Parameterised type definitions',
+        source: `; Generic (parameterised) types
+paginated<T> = {
+  items: [* T],
+  page: uint,
+  total: uint,
+  ? next: uri,
+}
+
+user = {
+  id: uint,
+  name: text,
+}
+
+user-page = paginated<user>
+`,
+      },
+    ],
+  },
+  {
+    category: 'Intermediate',
+    items: [
+      {
+        name: 'Socket / Plug',
+        desc: 'Extensible types via $/ $$ sockets',
+        source: `; Extensible records using socket/plug (RFC 8610 §3.9)
+PersonalData = {
+  ? displayName: tstr,
+  NameComponents,
+  ? age: uint,
+  * $$personaldata-extensions,
+}
+
+NameComponents = (
+  ? firstName: tstr,
+  ? familyName: tstr,
+)
+
+; Extensions can be added from different sources
+$$personaldata-extensions //= (
+  favorite-salsa: tstr,
+)
+
+$$personaldata-extensions //= (
+  shoesize: uint,
+)
+`,
+      },
+      {
+        name: 'Constrained Strings',
+        desc: 'Size and regex control operators',
+        source: `; String constraints with control operators
+hostname = text .regexp "[a-zA-Z][a-zA-Z0-9\\\\-]*(\\\\.[a-zA-Z][a-zA-Z0-9\\\\-]*)*"
+
+email = text .regexp "[a-zA-Z0-9._%+\\\\-]+@[a-zA-Z0-9.\\\\-]+\\\\.[a-zA-Z]{2,}"
+
+short-text = text .size (1..256)
+
+sha256-hash = bytes .size 32
+
+port = uint .size 2
+
+ip4-addr = bytes .size 4
+
+ip6-addr = bytes .size 16
+`,
+      },
+      {
+        name: 'Tagged CBOR',
+        desc: 'CBOR tags and embedded data',
+        source: `; CBOR tags and embedded CBOR
+date-time = #6.0(tstr)
+
+epoch-time = #6.1(int / float)
+
+bignum = #6.2(bstr)
+
+uri = #6.32(tstr)
+
+embedded-cbor = #6.24(bstr .cbor inner-structure)
+
+inner-structure = {
+  version: uint,
+  payload: bytes,
+}
+`,
+      },
+      {
+        name: 'Occurrence Indicators',
+        desc: 'Optional, one-or-more, and exact counts',
+        source: `; Occurrence indicators
+config = {
+  ; Required field (exactly once)
+  name: text,
+
+  ; Optional field (zero or one)
+  ? description: text,
+
+  ; One or more tags
+  tags: [+ text],
+
+  ; Zero or more metadata entries
+  metadata: {* text => any},
+
+  ; Exactly 3 priority levels
+  priorities: [3 uint],
+
+  ; Between 1 and 5 items
+  items: [1*5 item],
+}
+
+item = {
+  id: uint,
+  value: any,
+}
+`,
+      },
+    ],
+  },
+  {
+    category: 'Real-World',
+    items: [
+      {
+        name: 'JSON Web Token (JWT)',
+        desc: 'Claims set for a JWT/CWT token',
+        source: `; JWT / CWT Claims Set (RFC 7519 / RFC 8392)
+claims-set = {
+  ? iss: text,            ; Issuer
+  ? sub: text,            ; Subject
+  ? aud: text / [+ text], ; Audience
+  ? exp: uint,            ; Expiration Time
+  ? nbf: uint,            ; Not Before
+  ? iat: uint,            ; Issued At
+  ? jti: text,            ; JWT ID
+  * text => any,          ; Additional claims
+}
+`,
+      },
+      {
+        name: 'COSE Key',
+        desc: 'COSE Key structure (RFC 9052)',
+        source: `; COSE Key Structure (RFC 9052 / RFC 9053)
+COSE-Key = {
+  1 => kty,              ; Key Type
+  ? 2 => bytes,          ; Key ID
+  ? 3 => int / text,     ; Algorithm
+  ? 4 => [+ key-ops],    ; Key Operations
+  ? 5 => bytes,          ; Base IV
+  * label => any,
+}
+
+kty = int / text
+
+key-ops = int / text
+
+label = int / text
+
+; EC2 key parameters (for P-256, P-384, P-521)
+COSE-Key-EC2 = COSE-Key .and {
+  -1 => int,             ; Curve
+  -2 => bytes,           ; x-coordinate
+  ? -3 => bytes,         ; y-coordinate
+  ? -4 => bytes,         ; Private key
+}
+`,
+      },
+      {
+        name: 'Reputon',
+        desc: 'Reputation Interchange (RFC 7071)',
+        source: `; Reputation Interchange format (RFC 7071)
+reputation-object = {
+  reputation-context,
+  reputon-list,
+}
+
+reputation-context = ( application: text )
+
+reputon-list = ( reputons: reputon-array )
+
+reputon-array = [* reputon]
+
+reputon = {
+  rater-value,
+  assertion-value,
+  rated-value,
+  rating-value,
+  ? conf-value,
+  ? normal-value,
+  ? sample-value,
+  ? gen-value,
+  ? expire-value,
+  * ext-value,
+}
+
+rater-value = ( rater: text )
+assertion-value = ( assertion: text )
+rated-value = ( rated: text )
+rating-value = ( rating: float16 )
+conf-value = ( confidence: float16 )
+normal-value = ( normal-rating: float16 )
+sample-value = ( sample-size: uint )
+gen-value = ( generated: uint )
+expire-value = ( expires: uint )
+ext-value = ( text => any )
+`,
+      },
+      {
+        name: 'CoSWID Tag',
+        desc: 'Concise Software Identification (RFC 9393)',
+        source: `; Concise Software Identification — CoSWID (RFC 9393)
+concise-swid-tag = {
+  tag-id => text / bstr .size 16,
+  tag-version => integer,
+  ? corpus => bool,
+  ? patch => bool,
+  ? supplemental => bool,
+  software-name => text,
+  ? software-version => text,
+  ? version-scheme => $version-scheme,
+  entity => entity-entry / [2* entity-entry],
+  ? link => link-entry / [2* link-entry],
+  * $$coswid-extension,
+}
+
+$version-scheme /= &(
+  multipartnumeric: 1,
+  multipartnumeric-suffix: 2,
+  alphanumeric: 3,
+  decimal: 4,
+  semver: 16384,
+)
+$version-scheme /= uint / text
+
+entity-entry = {
+  entity-name => text,
+  ? reg-id => uri,
+  role => $role / [2* $role],
+  ? thumbprint => hash-entry,
+  * $$entity-extension,
+}
+
+$role /= &(
+  tag-creator: 1,
+  software-creator: 2,
+  aggregator: 3,
+  distributor: 4,
+  licensor: 5,
+)
+$role /= uint / text
+
+link-entry = {
+  ? artifact => text,
+  href => uri,
+  rel => $rel,
+  ? media-type => text,
+  * $$link-extension,
+}
+
+$rel /= &(
+  ancestor: -1,
+  component: -2,
+  feature: -3,
+  installationmedia: -4,
+  packageinstaller: -5,
+  parent: -6,
+  patches: -7,
+  requires: -8,
+  see-also: -9,
+  supersedes: -10,
+  supplemental: -11,
+)
+$rel /= int / text
+
+hash-entry = [hash-alg-id: int, hash-value: bytes]
+
+tag-id = 0
+tag-version = 12
+software-name = 1
+software-version = 13
+version-scheme = 14
+entity = 2
+link = 4
+corpus = 8
+patch = 9
+supplemental = 11
+entity-name = 31
+reg-id = 32
+role = 33
+thumbprint = 34
+artifact = 37
+href = 38
+rel = 40
+media-type = 41
+uri = text
+`,
+      },
+      {
+        name: 'WebAuthn Attestation',
+        desc: 'Web Authentication attestation object',
+        source: `; WebAuthn Attestation Object (simplified)
+attestation-object = {
+  fmt: text,
+  attStmt: attestation-statement,
+  authData: bytes,
+}
+
+attestation-statement = packed-stmt / tpm-stmt / none-stmt
+
+packed-stmt = {
+  alg: int,
+  sig: bytes,
+  ? x5c: [+ bytes],
+}
+
+tpm-stmt = {
+  alg: int,
+  sig: bytes,
+  ver: "2.0",
+  ? x5c: [+ bytes],
+  certInfo: bytes,
+  pubArea: bytes,
+}
+
+none-stmt = {}
+
+authenticator-data = bytes
+
+credential-public-key = {
+  1 => int,              ; kty
+  3 => int,              ; alg
+  -1 => int,             ; crv (for EC2)
+  -2 => bytes,           ; x
+  -3 => bytes,           ; y
+}
+
+rp-entity = {
+  id: text,
+  name: text,
+  ? icon: text,
+}
+
+user-entity = {
+  id: bytes .size (1..64),
+  name: text,
+  displayName: text,
+  ? icon: text,
+}
+`,
+      },
+      {
+        name: 'EAT Token',
+        desc: 'Entity Attestation Token (EAT)',
+        source: `; Entity Attestation Token (EAT) — simplified
+eat-token = {
+  ; Standard CWT/JWT claims
+  ? 1 => text,             ; iss
+  ? 2 => text,             ; sub
+  ? 4 => uint,             ; exp
+  ? 6 => uint,             ; iat
+
+  ; EAT-specific claims
+  ? 10 => nonce,            ; nonce
+  ? 256 => ueid,            ; UEID
+  ? 258 => oemid,           ; OEM ID
+  ? 259 => security-level,
+  ? 261 => boot-state,
+  ? 265 => [+ swclaim],     ; Software claims
+  * label => any,
+}
+
+nonce = bytes .size (8..64)
+
+ueid = bytes .size (7..33)
+
+oemid = bytes .size 3 / int
+
+security-level = &(
+  unrestricted: 1,
+  restricted: 2,
+  secure-restricted: 3,
+  hardware: 4,
+)
+
+boot-state = &(
+  secure: 1,
+  insecure: 2,
+  locked: 3,
+)
+
+swclaim = {
+  ? 1 => text,       ; measurement type
+  ? 2 => bytes,      ; measurement value
+  ? 4 => text,       ; version
+  ? 5 => uint,       ; signer ID
+}
+
+label = int / text
+`,
+      },
+    ],
+  },
+];
+
+/**
+ * Scan the source text up to a byte offset and find the deepest unmatched
+ * opening delimiter.  Returns { char, line, column } or null.
+ */
+/** @type {(source: string, upTo?: number) => {char: string, closer: string, line: number, column: number} | null} */
+function findUnmatchedOpener(source, upTo) {
+  const stack = []; // { char, pos, line, column }
+  /** @type {Record<string, string>} */
+  const match = { '{': '}', '[': ']', '(': ')' };
+  const close = new Set(['}', ']', ')']);
+  let line = 1;
+  let col = 1;
+  let inString = false;
+  let strChar = '';
+  let inComment = false;
+
+  const end = upTo != null ? Math.min(upTo, source.length) : source.length;
+
+  for (let i = 0; i < end; i++) {
+    const ch = source[i];
+
+    if (ch === '\n') {
+      inComment = false;
+      line++;
+      col = 1;
+      continue;
+    }
+
+    if (inComment) {
+      col++;
+      continue;
+    }
+
+    if (inString) {
+      if (ch === '\\') {
+        i++;
+        col += 2;
+        continue;
+      }
+      if (ch === strChar) inString = false;
+      col++;
+      continue;
+    }
+
+    if (ch === ';') {
+      inComment = true;
+      col++;
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      inString = true;
+      strChar = ch;
+      col++;
+      continue;
+    }
+
+    if (match[ch]) {
+      stack.push({ char: ch, closer: match[ch], line, column: col });
+    } else if (close.has(ch)) {
+      // Pop matching opener
+      if (stack.length > 0 && stack[stack.length - 1].closer === ch) {
+        stack.pop();
+      }
+    }
+    col++;
+  }
+
+  return stack.length > 0 ? stack[stack.length - 1] : null;
+}
+
+/**
+ * Normalise a WASM error object into the shape the UI expects.
+ */
+/** @type {(err: import('./src/types.js').WasmDiagnostic) => Diagnostic} */
+function normaliseError(err) {
+  const line = err.position?.line ?? 1;
+  const column = err.position?.column ?? 1;
+  const range =
+    Array.isArray(err.position?.range) && err.position.range.length === 2
+      ? err.position.range
+      : null;
+
+  let message = err.msg?.short || err.msg?.extended || 'Unknown error';
+
+  // Strip redundant prefixes
+  message = message.replace(/^(Lexer error|Parser error|Error)[.:]\s*/i, '').trim();
+
+  // Capitalise first letter
+  if (message && /^[a-z]/.test(message)) {
+    message = message[0].toUpperCase() + message.slice(1);
+  }
+
+  // Ensure sentence-ending punctuation
+  if (message && !/[.!?]$/.test(message)) {
+    message += '.';
+  }
+
+  // Categorise
+  const lc = message.toLowerCase();
+  let category = 'Syntax';
+  if (
+    /\btoken\b|character|symbol|escape|unterminated|byte string|text string|hexfloat|exponent/.test(
+      lc,
+    )
+  )
+    category = 'Lexer';
+  else if (/expected|unexpected|missing|invalid.*syntax|must be/.test(lc)) category = 'Parser';
+  else if (/not defined|undefined|unknown/.test(lc)) category = 'Reference';
+  else if (/duplicate|already defined/.test(lc)) category = 'Duplicate';
+
+  return { line, column, range, message, category, severity: err.severity || 'error', _raw: err };
+}
+
+/**
+ * Detect if an error is really about a missing closing delimiter, and if so,
+ * rewrite the message and redirect the marker to the unmatched opener.
+ */
+/** @type {(errors: Diagnostic[], source: string) => Diagnostic[]} */
+function enrichWithDelimiterCheck(errors, source) {
+  return errors.map((err) => {
+    const lc = err.message.toLowerCase();
+    // Pest errors for missing closing delimiters mention these expected tokens
+    const isMissingClose =
+      /expected.*\b(group_choice_op|group\s*entry|grpchoice|grpent|type_choice_op)\b/i.test(lc) ||
+      /expected.*\b(eoi|rule)\b/i.test(lc) ||
+      (/expected.*\btype\b/i.test(lc) && !/type\s+assignment/i.test(lc));
+
+    if (!isMissingClose) return err;
+
+    // Convert error position to a byte offset for scanning
+    const lines = source.split('\n');
+    let byteOffset = 0;
+    for (let i = 0; i < err.line - 1 && i < lines.length; i++) {
+      byteOffset += lines[i].length + 1; // +1 for newline
+    }
+    byteOffset += err.column - 1;
+
+    const opener = findUnmatchedOpener(source, byteOffset + 50);
+    if (!opener) return err;
+
+    const closerName =
+      opener.closer === '}'
+        ? "brace '}'"
+        : opener.closer === ']'
+          ? "bracket ']'"
+          : "parenthesis ')'";
+    return {
+      ...err,
+      message: `Missing closing ${closerName} — opened on Ln ${opener.line}, Col ${opener.column}.`,
+      category: 'Parser',
+      // Redirect marker to the unmatched opening delimiter
+      _openerLine: opener.line,
+      _openerColumn: opener.column,
+    };
+  });
+}
+
+/**
+ * Validate CDDL text using the WASM library.
+ * Returns { isValid, errors }.
+ */
+/** @type {(cddlText: string) => {isValid: boolean, errors: Diagnostic[]}} */
+function validateCDDLText(cddlText) {
+  if (!wasmModule?.validate_cddl_from_str) {
+    return {
+      isValid: false,
+      errors: [
+        {
+          line: 1,
+          column: 1,
+          range: null,
+          message: 'WASM module not ready.',
+          category: 'Internal',
+        },
+      ],
+    };
+  }
+
+  try {
+    const rawErrors = wasmModule.validate_cddl_from_str(cddlText, checkRefs);
+    if (!Array.isArray(rawErrors) || rawErrors.length === 0) {
+      return { isValid: true, errors: [] };
+    }
+    const errors = rawErrors.map(normaliseError);
+    const enriched = enrichWithDelimiterCheck(errors, cddlText);
+    // Deduplicate errors with identical message + location
+    const seen = new Set();
+    const deduped = enriched.filter((e) => {
+      const loc = e._openerLine ? `${e._openerLine}:${e._openerColumn}` : `${e.line}:${e.column}`;
+      const key = `${e.message}|${loc}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+    const hasErrors = deduped.some((e) => e.severity === 'error');
+    return { isValid: !hasErrors, errors: deduped };
+  } catch (err) {
+    // Unexpected failure — surface it as a single error
+    return {
+      isValid: false,
+      errors: [{ line: 1, column: 1, range: null, message: String(err), category: 'Internal' }],
+    };
+  }
+}
+
+// ─── UI State ──────────────────────────────────────────────────────────────────
+
+const CACHE_KEY = 'cddl-playground-content';
+
+const DEFAULT_EXAMPLE = `; Example CDDL schema
+person = {
+  name: text,
+  age: 0..120,
+  ? address: text,
+  ? email: text,
+}
+
+people = [* person]`;
+
+function loadContent() {
+  try {
+    const c = localStorage.getItem(CACHE_KEY);
+    if (c) return c;
+  } catch (_) {
+    // Storage may be disabled; keep the editor usable without persistence.
+  }
+  return DEFAULT_EXAMPLE;
+}
+
+/** @type {(content: string) => void} */
+function saveContent(content) {
+  try {
+    localStorage.setItem(CACHE_KEY, content);
+  } catch (_) {
+    // Storage may be disabled; keep the current in-memory document.
+  }
+}
+
+// ─── DOM References ────────────────────────────────────────────────────────────
+
+/** @type {Editor | undefined} */
+let editor;
+/** @type {Editor | undefined} */
+let instanceEditor;
+/** @type {HTMLElement | null} */
+let statusPill = null;
+/** @type {HTMLElement | null} */
+let statusText = null;
+/** @type {HTMLElement | null} */
+let problemsPanel = null;
+/** @type {HTMLElement | null} */
+let problemsBadge = null;
+/** @type {HTMLElement | null} */
+let problemsBody = null;
+/** @type {HTMLElement | null} */
+let cursorPosition = null;
+
+const INSTANCE_TEXT_CACHE_KEY = 'cddl-playground-instance-text';
+const INSTANCE_TEXT_CBOR_CACHE_KEY = 'cddl-playground-instance-text-cbor';
+const INSTANCE_KIND_CACHE_KEY = 'cddl-playground-instance-kind';
+const INSTANCE_PANE_CACHE_KEY = 'cddl-playground-instance-open';
+const OUTLINE_PANE_CACHE_KEY = 'cddl-playground-outline-open';
+
+/** @type {'json'|'cbor'} */
+let instanceKind = 'json';
+// One buffer per instance kind — switching tabs must not carry text over.
+let instanceTexts = { json: '', cbor: '' };
+/** @type {HTMLElement | null} */
+let instancePane = null;
+/** @type {HTMLElement | null} */
+let instanceToggleBtn = null;
+/** @type {HTMLElement | null} */
+let instanceResult = null;
+/** @type {HTMLSelectElement | null} */
+let instanceRootRule = null;
+/** @type {HTMLElement | null} */
+let instanceTabJson = null;
+/** @type {HTMLElement | null} */
+let instanceTabCbor = null;
+/** @type {HTMLElement | null} */
+let instanceCborHint = null;
+/** @type {HTMLElement | null} */
+let outlinePane = null;
+/** @type {HTMLElement | null} */
+let outlineToggleBtn = null;
+/** @type {HTMLInputElement | null} */
+let outlineFilter = null;
+/** @type {HTMLElement | null} */
+let outlineList = null;
+/** @type {import('./src/outline.js').CddlRule[]} */
+let outlineRules = [];
+/** @type {ReturnType<typeof setTimeout> | undefined} */
+let schemaFeatureTimer;
+/** @type {ReturnType<typeof initShortcutsModal> | undefined} */
+let shortcutsController;
+/** @type {(() => void) | undefined} */
+let navigationDisposer;
+
+// ─── Problems Panel ────────────────────────────────────────────────────────────
+
+/** @type {(errors: Diagnostic[]) => void} */
+function updateProblems(errors) {
+  const count = errors.length;
+  let errorCount = 0;
+  let warningCount = 0;
+  for (let i = 0; i < count; i++) {
+    if (errors[i].severity === 'error') errorCount++;
+    else warningCount++;
+  }
+
+  // Badge
+  if (problemsBadge) {
+    problemsBadge.textContent = String(count);
+    problemsBadge.classList.toggle('zero', count === 0);
+  }
+
+  // Status pill
+  if (statusPill) statusPill.className = 'status-pill';
+  if (errorCount > 0) {
+    if (statusPill) statusPill.classList.add('invalid');
+    const parts = [];
+    parts.push(`${errorCount} error${errorCount > 1 ? 's' : ''}`);
+    if (warningCount > 0) parts.push(`${warningCount} warning${warningCount > 1 ? 's' : ''}`);
+    if (statusText) statusText.textContent = parts.join(', ');
+  } else if (warningCount > 0) {
+    if (statusPill) statusPill.classList.add('valid');
+    if (statusText)
+      statusText.textContent = `Valid \u2022 ${warningCount} warning${warningCount > 1 ? 's' : ''}`;
+  } else {
+    if (statusPill) statusPill.classList.add('valid');
+    if (statusText) statusText.textContent = 'Valid';
+  }
+
+  // Body — batch DOM writes with a document fragment
+  if (!problemsBody) return;
+
+  if (count === 0) {
+    problemsBody.innerHTML = '';
+    problemsBody.appendChild(createEmptyState());
+    return;
+  }
+
+  // Auto-expand when errors appear
+  if (problemsPanel) problemsPanel.classList.remove('collapsed');
+
+  const frag = document.createDocumentFragment();
+  for (let i = 0; i < count; i++) {
+    const err = errors[i];
+    const isWarning = err.severity === 'warning';
+    const row = document.createElement('div');
+    row.className = isWarning ? 'problem-row warning' : 'problem-row';
+    const jumpLine = err._openerLine || err.line;
+    const jumpCol = err._openerColumn || err.column;
+    row.onclick = () => jumpTo(jumpLine, jumpCol);
+
+    const icon = isWarning
+      ? `<svg class="problem-icon" viewBox="0 0 16 16" fill="currentColor">
+          <path d="M8.22 1.754a.25.25 0 0 0-.44 0L1.698 13.132a.25.25 0 0 0 .22.368h12.164a.25.25 0 0 0 .22-.368Zm-1.763-.707c.659-1.234 2.427-1.234 3.086 0l6.082 11.378A1.75 1.75 0 0 1 14.082 15H1.918a1.75 1.75 0 0 1-1.543-2.575ZM9 11a1 1 0 1 1-2 0 1 1 0 0 1 2 0Zm-.25-5.25a.75.75 0 0 0-1.5 0v2.5a.75.75 0 0 0 1.5 0Z"/>
+        </svg>`
+      : `<svg class="problem-icon" viewBox="0 0 16 16" fill="currentColor">
+          <path d="M8 1a7 7 0 1 0 0 14A7 7 0 0 0 8 1ZM7.25 4.5a.75.75 0 0 1 1.5 0v3.25a.75.75 0 0 1-1.5 0V4.5ZM8 10.5A.75.75 0 1 1 8 12a.75.75 0 0 1 0-1.5Z"/>
+        </svg>`;
+
+    row.innerHTML = `${icon}<span class="problem-message">${escapeHtml(err.message)}</span><span class="problem-category">${escapeHtml(err.category)}</span><span class="problem-location">[Ln ${jumpLine}, Col ${jumpCol}]</span>`;
+
+    frag.appendChild(row);
+  }
+  problemsBody.innerHTML = '';
+  problemsBody.appendChild(frag);
+}
+
+function createEmptyState() {
+  const el = document.createElement('div');
+  el.className = 'problems-empty';
+  el.innerHTML = `
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+      <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/>
+      <polyline points="22 4 12 14.01 9 11.01"/>
+    </svg>
+    No problems detected
+  `;
+  return el;
+}
+
+/** @type {Record<string, string>} */
+const _escapeMap = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
+const _escapeRe = /[&<>"']/g;
+/** @type {(str: string) => string} */
+function escapeHtml(str) {
+  return str.replace(_escapeRe, (ch) => _escapeMap[ch]);
+}
+
+/** @type {(line: number, column: number) => void} */
+function jumpTo(line, column) {
+  if (!editor) return;
+  editor.setPosition({ lineNumber: line, column });
+  editor.focus();
+  editor.revealLineInCenter(line);
+}
+
+// ─── CDDL Formatter ────────────────────────────────────────────────────────────
+
+/**
+ * Format CDDL source text.
+ * - Normalise blank lines (collapse multiple into one)
+ * - Indent group entries inside { }, [ ], ( ) by 2 spaces
+ * - Trim trailing whitespace
+ * - Ensure trailing newline
+ */
+/** @type {(source: string) => string} */
+function formatCDDL(source) {
+  const lines = source.split('\n');
+  const out = [];
+  let depth = 0;
+  let prevBlank = false;
+
+  for (let i = 0; i < lines.length; i++) {
+    let line = lines[i].trimEnd();
+    const stripped = line.trim();
+
+    // Collapse multiple blank lines into one
+    if (stripped === '') {
+      if (!prevBlank && out.length > 0) out.push('');
+      prevBlank = true;
+      continue;
+    }
+    prevBlank = false;
+
+    // Closing delimiters reduce indent before this line
+    const leadingClose = stripped.match(/^[\]})]+/);
+    if (leadingClose) {
+      depth = Math.max(0, depth - leadingClose[0].length);
+    }
+
+    // Re-indent
+    const indent = '  '.repeat(depth);
+    out.push(indent + stripped);
+
+    // Count net openers on this line (ignoring those inside strings/comments)
+    const noComment = stripped.replace(/;.*$/, '');
+    const noStrings = noComment.replace(/"[^"]*"/g, '').replace(/'[^']*'/g, '');
+    for (const ch of noStrings) {
+      if (ch === '{' || ch === '[' || ch === '(') depth++;
+      else if (ch === '}' || ch === ']' || ch === ')') depth = Math.max(0, depth - 1);
+    }
+  }
+
+  // Trim trailing blank lines, then add one trailing newline
+  while (out.length > 0 && out[out.length - 1] === '') out.pop();
+  out.push('');
+
+  return out.join('\n');
+}
+
+function applyFormat() {
+  if (!editor) return;
+  const model = editor.getModel();
+  if (!model) return;
+  const source = model.getValue();
+  const formatted = formatCDDL(source);
+  if (formatted !== source) {
+    // Use pushEditOperations so it's undoable
+    const fullRange = model.getFullModelRange();
+    editor.executeEdits('cddl-format', [
+      {
+        range: fullRange,
+        text: formatted,
+      },
+    ]);
+  }
+}
+
+// ─── Validation loop ───────────────────────────────────────────────────────────
+
+/** @type {ReturnType<typeof setTimeout> | undefined} */
+let validationTimer;
+
+let lastInput = '';
+/** @type {string | null} */
+let lastValidatedInput = null;
+/** @type {ReturnType<typeof setTimeout> | undefined} */
+let saveTimer;
+
+function scheduleValidation() {
+  clearTimeout(validationTimer);
+  validationTimer = setTimeout(runValidation, 400);
+  scheduleSchemaFeatures();
+}
+
+function scheduleSave() {
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(() => saveContent(lastInput), 1000);
+}
+
+function runValidation() {
+  if (!editor) return;
+  const model = editor.getModel();
+  if (!model) return;
+  const input = editor.getValue();
+  // Skip only when the previous run produced a real result; a "not ready" stub
+  // must not poison the cache, or it survives until the next keystroke.
+  if (input === lastValidatedInput) return;
+  lastInput = input;
+  scheduleSave();
+
+  if (!input.trim()) {
+    lastValidatedInput = input;
+    updateProblems([]);
+    monaco.editor.setModelMarkers(model, 'cddl', []);
+    if (statusPill) statusPill.className = 'status-pill';
+    if (statusText) statusText.textContent = 'Ready';
+    return;
+  }
+
+  // Show checking state briefly
+  if (statusPill) statusPill.className = 'status-pill checking';
+  if (statusText) statusText.textContent = 'Checking\u2026';
+
+  const result = validateCDDLText(input);
+  lastValidatedInput = wasmModule?.validate_cddl_from_str ? input : null;
+  updateProblems(result.errors);
+
+  // Update Monaco markers
+  const markers = result.errors.map((err) => toMarker(model, err));
+  monaco.editor.setModelMarkers(model, 'cddl', markers);
+}
+
+/**
+ * Convert a normalised error into a Monaco IMarkerData.
+ *
+ * Strategy:
+ *  1. If the error has a byte `range`, use it for precise highlighting.
+ *  2. Otherwise, use the line/column and try to highlight the token at that
+ *     position (scan forward to end of word / operator).
+ *  3. Final fallback: highlight from column to end-of-line.
+ */
+/** @type {(model: monaco.editor.ITextModel, err: Diagnostic) => monaco.editor.IMarkerData} */
+function toMarker(model, err) {
+  const severity =
+    err.severity === 'warning' ? monaco.MarkerSeverity.Warning : monaco.MarkerSeverity.Error;
+
+  // ── Unmatched opener (missing closing delimiter) ──
+  if (err._openerLine) {
+    const oLine = Math.max(1, Math.min(err._openerLine, model.getLineCount()));
+    const oContent = model.getLineContent(oLine);
+    const oCol = Math.max(1, Math.min(err._openerColumn || 1, oContent.length + 1));
+    return {
+      startLineNumber: oLine,
+      startColumn: oCol,
+      endLineNumber: oLine,
+      endColumn: oCol + 1,
+      message: err.message,
+      severity,
+      source: 'cddl',
+    };
+  }
+
+  // ── Range-based (best) ──
+  if (err.range && err.range.length === 2 && err.range[1] > err.range[0]) {
+    const s = model.getPositionAt(err.range[0]);
+    const e = model.getPositionAt(err.range[1]);
+    return {
+      startLineNumber: s.lineNumber,
+      startColumn: s.column,
+      endLineNumber: e.lineNumber,
+      endColumn: e.column,
+      message: err.message,
+      severity,
+      source: 'cddl',
+    };
+  }
+
+  // ── Token-based (good) ──
+  const lineNumber = Math.max(1, Math.min(err.line, model.getLineCount()));
+  const lineContent = model.getLineContent(lineNumber);
+  const col = Math.max(1, Math.min(err.column, lineContent.length + 1));
+
+  // Try to highlight from col to the end of the current "token"
+  let endCol = col;
+  const rest = lineContent.substring(col - 1);
+
+  if (rest.length > 0) {
+    // Match identifier, number, string-quote, or operator cluster
+    const tokenMatch = rest.match(
+      /^(?:[a-zA-Z_][\w-]*|\d[\d.eE+-]*|"[^"]*"?|'[^']*'?|[^\s,;{}()[\]]+)/,
+    );
+    if (tokenMatch) {
+      endCol = col + tokenMatch[0].length;
+    } else {
+      // Single character (bracket, delimiter, etc.)
+      endCol = col + 1;
+    }
+  }
+
+  // Ensure we highlight at least something
+  if (endCol <= col) {
+    endCol = Math.min(col + 1, lineContent.length + 1);
+  }
+
+  // If the error points past the end of the line, to an empty/whitespace line,
+  // or to a closing delimiter (the real problem is the token before it), walk
+  // back to the previous meaningful token — possibly on an earlier line.
+  const charAtCol = lineContent[col - 1] || '';
+  const isClosingDelim = /^[\])}]$/.test(charAtCol);
+  if (isClosingDelim) {
+    // The error is at a closing delimiter — highlight the gap just before it
+    // where the missing token is expected (e.g. the space after `*` in `[* ]`).
+    const prefix = lineContent.substring(0, col - 1);
+    const trimmedPrefix = prefix.trimEnd();
+    // Place a 1-char marker right after the last non-space character
+    const insertCol = trimmedPrefix.length + 1;
+    return {
+      startLineNumber: lineNumber,
+      startColumn: insertCol,
+      endLineNumber: lineNumber,
+      endColumn: insertCol + 1,
+      message: err.message,
+      severity,
+      source: 'cddl',
+    };
+  }
+  if (col > lineContent.length || lineContent.trim().length === 0) {
+    // Column is past end-of-line or the line is empty/whitespace.
+    // First try: highlight the last token on the SAME line (if it has content).
+    const trimmedCurrent = lineContent.trimEnd();
+    if (trimmedCurrent.length > 0) {
+      const lastMatch = trimmedCurrent.match(/[a-zA-Z_][\w-]*$|"[^"]*"$|'[^']*'$|\S+$/);
+      if (lastMatch) {
+        const start = trimmedCurrent.length - lastMatch[0].length + 1;
+        return {
+          startLineNumber: lineNumber,
+          startColumn: start,
+          endLineNumber: lineNumber,
+          endColumn: trimmedCurrent.length + 1,
+          message: err.message,
+          severity,
+          source: 'cddl',
+        };
+      }
+    }
+    // Current line is truly empty — walk back to the previous non-empty line
+    let targetLine = lineNumber;
+    let targetContent = lineContent;
+    while (targetLine > 1) {
+      targetLine--;
+      targetContent = model.getLineContent(targetLine);
+      if (targetContent.trim().length > 0) break;
+    }
+    const trimmed = targetContent.trimEnd();
+    const lastTokenMatch = trimmed.match(/[a-zA-Z_][\w-]*$|"[^"]*"$|'[^']*'$|\S+$/);
+    if (lastTokenMatch) {
+      const start = trimmed.length - lastTokenMatch[0].length + 1;
+      return {
+        startLineNumber: targetLine,
+        startColumn: start,
+        endLineNumber: targetLine,
+        endColumn: trimmed.length + 1,
+        message: err.message,
+        severity,
+        source: 'cddl',
+      };
+    }
+    return {
+      startLineNumber: targetLine,
+      startColumn: 1,
+      endLineNumber: targetLine,
+      endColumn: targetContent.length + 1,
+      message: err.message,
+      severity,
+      source: 'cddl',
+    };
+  }
+
+  return {
+    startLineNumber: lineNumber,
+    startColumn: col,
+    endLineNumber: lineNumber,
+    endColumn: endCol,
+    message: err.message,
+    severity,
+    source: 'cddl',
+  };
+}
+
+// ─── Instance Validation ─────────────────────────────────────────────────────
+
+/** @type {(sharedState: PlaygroundState | null, kind: 'json'|'cbor') => {json: string, cbor: string}} */
+function loadInstanceTexts(sharedState, kind) {
+  const texts = { json: '', cbor: '' };
+  if (sharedState) {
+    texts[kind] = typeof sharedState.instance === 'string' ? sharedState.instance : '';
+    return texts;
+  }
+  try {
+    // The legacy single-buffer key predates per-kind buffers. If the user was
+    // last on the CBOR tab and no CBOR buffer exists yet, that text is CBOR.
+    const legacy = localStorage.getItem(INSTANCE_TEXT_CACHE_KEY) || '';
+    const cbor = localStorage.getItem(INSTANCE_TEXT_CBOR_CACHE_KEY);
+    if (cbor === null && kind === 'cbor') {
+      texts.cbor = legacy;
+    } else {
+      texts.json = legacy;
+      texts.cbor = cbor || '';
+    }
+  } catch (_) {
+    logStorageUnavailable('storage.instance_texts');
+  }
+  return texts;
+}
+
+/** @type {(sharedState: PlaygroundState | null) => 'json'|'cbor'} */
+function loadInstanceKind(sharedState) {
+  if (sharedState?.kind === 'json' || sharedState?.kind === 'cbor') return sharedState.kind;
+  try {
+    const saved = localStorage.getItem(INSTANCE_KIND_CACHE_KEY);
+    if (saved === 'json' || saved === 'cbor') return saved;
+  } catch (_) {
+    logStorageUnavailable('storage.instance_kind');
+  }
+  return 'json';
+}
+
+function saveInstanceState() {
+  try {
+    if (instanceEditor) {
+      instanceTexts[instanceKind] = instanceEditor.getValue();
+      localStorage.setItem(INSTANCE_TEXT_CACHE_KEY, instanceTexts.json);
+      localStorage.setItem(INSTANCE_TEXT_CBOR_CACHE_KEY, instanceTexts.cbor);
+    }
+    localStorage.setItem(INSTANCE_KIND_CACHE_KEY, instanceKind);
+    if (instancePane)
+      localStorage.setItem(
+        INSTANCE_PANE_CACHE_KEY,
+        String(!instancePane.classList.contains('collapsed')),
+      );
+  } catch (_) {
+    logStorageUnavailable('storage.instance_state');
+  }
+}
+
+function layoutInstanceNextFrame() {
+  if (!instanceEditor || (instancePane && instancePane.classList.contains('collapsed'))) return;
+  requestAnimationFrame(() => instanceEditor?.layout());
+}
+
+function layoutPlaygroundEditors() {
+  if (editor) editor.layout();
+  if (instanceEditor && (!instancePane || !instancePane.classList.contains('collapsed')))
+    instanceEditor.layout();
+}
+
+/** @type {(kind: 'json'|'cbor') => void} */
+function setInstanceKind(kind) {
+  const next = kind === 'cbor' ? 'cbor' : 'json';
+  const previous = instanceKind;
+  const switching = next !== previous;
+
+  // JSON and CBOR are different documents, not two views of one. Stash the
+  // outgoing buffer before swapping so switching tabs never carries text over.
+  if (switching && instanceEditor) instanceTexts[previous] = instanceEditor.getValue();
+
+  instanceKind = next;
+  if (instanceTabJson) {
+    instanceTabJson.classList.toggle('active', instanceKind === 'json');
+    instanceTabJson.setAttribute('aria-selected', String(instanceKind === 'json'));
+  }
+  if (instanceTabCbor) {
+    instanceTabCbor.classList.toggle('active', instanceKind === 'cbor');
+    instanceTabCbor.setAttribute('aria-selected', String(instanceKind === 'cbor'));
+  }
+  if (instanceCborHint) {
+    instanceCborHint.hidden = instanceKind !== 'cbor';
+    instanceCborHint.style.display = instanceKind === 'cbor' ? '' : 'none';
+    if (instanceKind === 'cbor' && wasmModule && !isCborSupported(wasmModule)) {
+      instanceCborHint.textContent = 'CBOR validation is not available in this WASM build.';
+    }
+  }
+  const model = instanceEditor?.getModel();
+  if (instanceEditor && model) {
+    monaco.editor.setModelLanguage(model, instanceKind === 'json' ? 'json' : 'plaintext');
+    if (switching) {
+      const restored = instanceTexts[instanceKind] || '';
+      if (instanceEditor.getValue() !== restored) instanceEditor.setValue(restored);
+    }
+  }
+  // A stale result from the other tab is misleading once the buffer changes.
+  if (switching) clearInstanceResult();
+  saveInstanceState();
+}
+
+function clearInstanceResult() {
+  if (!instanceResult) return;
+  instanceResult.textContent = '';
+  instanceResult.classList.remove('ok', 'fail');
+  // Restore the seeded placeholder rather than leaving an empty box behind.
+  const empty = document.createElement('div');
+  empty.className = 'instance-result-empty';
+  empty.textContent = 'Validation results will appear here.';
+  instanceResult.appendChild(empty);
+}
+
+/** @type {(result: import('./src/instance-validation.js').ValidationResult) => void} */
+function renderInstanceResult(result) {
+  if (!instanceResult) return;
+  instanceResult.textContent = '';
+  instanceResult.classList.remove('ok', 'fail');
+  instanceResult.classList.add(result.ok ? 'ok' : 'fail');
+
+  const title = document.createElement('div');
+  title.className = 'instance-result-title';
+  title.textContent =
+    result.title || (result.ok ? 'Instance is valid' : 'Instance validation failed');
+  instanceResult.appendChild(title);
+
+  const list = document.createElement('div');
+  list.className = 'instance-result-list';
+  const failures = Array.isArray(result.failures) ? result.failures : [];
+  if (failures.length === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'instance-result-empty';
+    empty.textContent = result.ok ? 'No failures.' : result.detail || 'Validation failed.';
+    list.appendChild(empty);
+  } else {
+    for (const failure of failures) {
+      const item = document.createElement('div');
+      item.className = 'instance-result-item';
+      item.textContent = String(failure);
+      list.appendChild(item);
+    }
+  }
+  instanceResult.appendChild(list);
+}
+
+function validateCurrentInstance() {
+  if (!editor || !instanceEditor) return;
+  const result = validateInstance({
+    wasmModule,
+    cddl: editor.getValue(),
+    kind: instanceKind,
+    text: instanceEditor.getValue(),
+    rootRule: instanceRootRule?.value || undefined,
+  });
+  renderInstanceResult(result);
+  toast(result.title, result.ok ? 'success' : 'error');
+}
+
+/** @type {(forceOpen?: boolean) => void} */
+function toggleInstancePane(forceOpen) {
+  if (!instancePane) return;
+  const open =
+    typeof forceOpen === 'boolean' ? forceOpen : instancePane.classList.contains('collapsed');
+  instancePane.classList.toggle('collapsed', !open);
+  if (instanceToggleBtn) instanceToggleBtn.classList.toggle('active', open);
+  saveInstanceState();
+  if (editor) editor.layout();
+  if (open) layoutInstanceNextFrame();
+}
+
+function refreshRootCandidates() {
+  if (!instanceRootRule || !editor) return;
+  const previous = instanceRootRule.value;
+  const roots = listRootCandidates(editor.getValue());
+  instanceRootRule.textContent = '';
+  for (const root of roots) {
+    const option = document.createElement('option');
+    option.value = root;
+    option.textContent = root;
+    instanceRootRule.appendChild(option);
+  }
+  if (previous && roots.includes(previous)) {
+    instanceRootRule.value = previous;
+  } else if (roots.length > 0) {
+    instanceRootRule.value = roots[0];
+  }
+}
+
+function generateCurrentSample() {
+  if (!editor || !instanceEditor) return;
+  const selectedRoot = instanceRootRule?.value || undefined;
+  const schema = editor.getValue();
+
+  // Verify candidates against the real validator rather than trusting heuristics.
+  /** @type {((json: string) => string | null) | undefined} */
+  const validate = wasmModule?.validate_json_from_str
+    ? (json) => {
+        const check = validateInstance({
+          wasmModule,
+          cddl: schema,
+          kind: 'json',
+          text: json,
+          rootRule: selectedRoot,
+        });
+        return check.ok ? null : check.failures[0] || check.title;
+      }
+    : undefined;
+
+  const result = generateSample(schema, selectedRoot, { validate });
+  if (result.error) {
+    toast(result.error, 'error');
+    return;
+  }
+  let warnedAlready = false;
+  if (result.json !== null) {
+    // The sample generator emits JSON only. If the user is on the CBOR tab,
+    // say so instead of silently swapping the tab out from under them — their
+    // CBOR buffer is preserved by setInstanceKind.
+    const cameFromCbor = instanceKind === 'cbor';
+    setInstanceKind('json');
+    instanceEditor.setValue(result.json);
+    saveInstanceState();
+    toggleInstancePane(true);
+    if (cameFromCbor) {
+      toast(
+        'The sample generator produces JSON, so the JSON tab was selected. Your CBOR input is preserved on the CBOR tab.',
+        'warning',
+        7000,
+      );
+      warnedAlready = true;
+    }
+    if (result.jsonRepresentable === false) {
+      toast(
+        'This schema uses CBOR-only features (integer keys, byte strings, or tags). The sample shows the expected structure but cannot validate as JSON — encode an equivalent CBOR document to validate it.',
+        'warning',
+        7000,
+      );
+      warnedAlready = true;
+    } else if (result.verified) {
+      toast('Generated sample instance', 'success');
+    } else if (result.validationError) {
+      toast(
+        `Generated a sample, but it does not validate: ${result.validationError}`,
+        'warning',
+        7000,
+      );
+      warnedAlready = true;
+    } else if (result.constraintsSatisfied === false) {
+      toast(
+        'Some control operator constraints could not be applied — the generated sample is a shape reference and may not validate. Adjust the highlighted values manually.',
+        'warning',
+        7000,
+      );
+      warnedAlready = true;
+    } else {
+      toast(
+        'Generated a sample, but it could not be verified because the validator is not ready.',
+        'warning',
+        7000,
+      );
+      warnedAlready = true;
+    }
+  }
+  if (!warnedAlready && result.warnings && result.warnings.length > 0) {
+    toast(`Generated with ${result.warnings.length} caveat(s): ${result.warnings[0]}`, 'warning');
+  }
+}
+
+/** @type {(sharedState: PlaygroundState | null) => void} */
+function initInstanceFeature(sharedState) {
+  try {
+    instancePane = document.getElementById('instancePane');
+    instanceToggleBtn = document.getElementById('instanceToggleBtn');
+    instanceTabJson = document.getElementById('instanceTabJson');
+    instanceTabCbor = document.getElementById('instanceTabCbor');
+    const rootSelect = document.getElementById('instanceRootRule');
+    instanceRootRule = rootSelect instanceof HTMLSelectElement ? rootSelect : null;
+    instanceResult = document.getElementById('instanceResult');
+    instanceCborHint = document.getElementById('instanceCborHint');
+    const container = document.getElementById('instanceEditor');
+    if (!container) return;
+
+    instanceKind = loadInstanceKind(sharedState);
+    instanceTexts = loadInstanceTexts(sharedState, instanceKind);
+    instanceEditor = monaco.editor.create(container, {
+      value: instanceTexts[instanceKind] || '',
+      language: instanceKind === 'json' ? 'json' : 'plaintext',
+      theme: isDark ? 'cddl-dark' : 'cddl-light',
+      fontSize: 14,
+      lineHeight: 22,
+      fontFamily: "'JetBrains Mono', 'Monaco', 'Menlo', 'Consolas', monospace",
+      fontLigatures: true,
+      minimap: { enabled: false },
+      scrollBeyondLastLine: false,
+      automaticLayout: false,
+      wordWrap: 'on',
+      wrappingIndent: 'indent',
+      lineNumbers: 'on',
+      renderLineHighlight: 'line',
+      cursorBlinking: 'smooth',
+      cursorSmoothCaretAnimation: 'on',
+      smoothScrolling: true,
+      bracketPairColorization: { enabled: true },
+      guides: { bracketPairs: 'active', indentation: true },
+      padding: { top: 12, bottom: 12 },
+      hover: { enabled: 'on', delay: 300, sticky: true },
+    });
+    instanceEditor.onDidChangeModelContent(saveInstanceState);
+
+    let open = false;
+    try {
+      open = localStorage.getItem(INSTANCE_PANE_CACHE_KEY) === 'true';
+    } catch (_) {
+      logStorageUnavailable('storage.instance_pane');
+    }
+    if (sharedState?.instance) open = true;
+    toggleInstancePane(open);
+    setInstanceKind(instanceKind);
+
+    if (instanceToggleBtn) instanceToggleBtn.addEventListener('click', () => toggleInstancePane());
+    const closeBtn = document.getElementById('instancePaneClose');
+    if (closeBtn) closeBtn.addEventListener('click', () => toggleInstancePane(false));
+    if (instanceTabJson) instanceTabJson.addEventListener('click', () => setInstanceKind('json'));
+    if (instanceTabCbor) instanceTabCbor.addEventListener('click', () => setInstanceKind('cbor'));
+    const validateBtn = document.getElementById('instanceValidateBtn');
+    if (validateBtn) validateBtn.addEventListener('click', validateCurrentInstance);
+    const genBtn = document.getElementById('instanceGenBtn');
+    if (genBtn) genBtn.addEventListener('click', generateCurrentSample);
+
+    const splitHandle = document.getElementById('instanceSplitHandle');
+    if (splitHandle && instancePane)
+      wireHorizontalResize(splitHandle, instancePane, 'ew-resize', 260, 720, -1);
+  } catch (err) {
+    logFailure('instance.initialization_failed', err);
+  }
+}
+
+// ─── Outline ─────────────────────────────────────────────────────────────────
+
+function renderOutlineNow() {
+  if (!outlineList) return;
+  renderOutline(outlineList, outlineRules, {
+    filter: outlineFilter?.value || '',
+    onSelect: (rule) => {
+      jumpTo(rule.line, rule.column);
+      if (editor) editor.focus();
+    },
+  });
+}
+
+function refreshOutline() {
+  if (!editor) return;
+  outlineRules = parseRules(editor.getValue());
+  renderOutlineNow();
+}
+
+function refreshSchemaFeatures() {
+  try {
+    refreshOutline();
+  } catch (err) {
+    logFailure('outline.refresh_failed', err);
+  }
+  try {
+    refreshRootCandidates();
+  } catch (err) {
+    logFailure('instance.roots_failed', err);
+  }
+}
+
+function scheduleSchemaFeatures() {
+  clearTimeout(schemaFeatureTimer);
+  schemaFeatureTimer = setTimeout(refreshSchemaFeatures, 400);
+}
+
+/** @type {(forceOpen?: boolean) => void} */
+function toggleOutlinePane(forceOpen) {
+  if (!outlinePane) return;
+  const open =
+    typeof forceOpen === 'boolean' ? forceOpen : outlinePane.classList.contains('collapsed');
+  outlinePane.classList.toggle('collapsed', !open);
+  if (outlineToggleBtn) outlineToggleBtn.classList.toggle('active', open);
+  try {
+    localStorage.setItem(OUTLINE_PANE_CACHE_KEY, String(open));
+  } catch (_) {
+    logStorageUnavailable('storage.outline_pane');
+  }
+  if (editor) editor.layout();
+}
+
+/** @type {(handle: HTMLElement, pane: HTMLElement, cursor: string, minWidth: number, maxWidth: number, direction: number) => void} */
+function wireHorizontalResize(handle, pane, cursor, minWidth, maxWidth, direction) {
+  handle.addEventListener('mousedown', (e) => {
+    if (pane.classList.contains('collapsed')) return;
+    e.preventDefault();
+    handle.classList.add('active');
+    document.body.style.cursor = cursor;
+    document.body.style.userSelect = 'none';
+
+    const startX = e.clientX;
+    const startWidth = pane.offsetWidth;
+    let rafId = 0;
+
+    /** @param {MouseEvent} ev */
+    function onMouseMove(ev) {
+      cancelAnimationFrame(rafId);
+      rafId = requestAnimationFrame(() => {
+        const delta = (ev.clientX - startX) * direction;
+        const newWidth = Math.max(minWidth, Math.min(startWidth + delta, maxWidth));
+        pane.style.flexBasis = newWidth + 'px';
+        layoutPlaygroundEditors();
+      });
+    }
+
+    function onMouseUp() {
+      handle.classList.remove('active');
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+      document.removeEventListener('mousemove', onMouseMove);
+      document.removeEventListener('mouseup', onMouseUp);
+    }
+
+    document.addEventListener('mousemove', onMouseMove);
+    document.addEventListener('mouseup', onMouseUp);
+  });
+}
+
+function initOutlineFeature() {
+  try {
+    outlinePane = document.getElementById('outlinePane');
+    outlineToggleBtn = document.getElementById('outlineToggleBtn');
+    const filterInput = document.getElementById('outlineFilter');
+    outlineFilter = filterInput instanceof HTMLInputElement ? filterInput : null;
+    outlineList = document.getElementById('outlineList');
+
+    let open = true;
+    try {
+      const saved = localStorage.getItem(OUTLINE_PANE_CACHE_KEY);
+      if (saved === 'false') open = false;
+    } catch (_) {
+      logStorageUnavailable('storage.outline_preference');
+    }
+    toggleOutlinePane(open);
+
+    if (outlineToggleBtn) outlineToggleBtn.addEventListener('click', () => toggleOutlinePane());
+    if (outlineFilter) outlineFilter.addEventListener('input', renderOutlineNow);
+    const resizeHandle = document.getElementById('outlineResizeHandle');
+    if (resizeHandle && outlinePane)
+      wireHorizontalResize(resizeHandle, outlinePane, 'ew-resize', 160, 420, 1);
+    navigationDisposer = registerNavigation(monaco, () => editor?.getValue() || '');
+  } catch (err) {
+    logFailure('outline.initialization_failed', err);
+  }
+}
+
+// ─── File I/O ────────────────────────────────────────────────────────────────
+
+/** @type {(source: string) => void} */
+function setMainEditorContent(source) {
+  if (!editor) return;
+  editor.setValue(source);
+  lastInput = '';
+  runValidation();
+  refreshSchemaFeatures();
+}
+
+/** @type {(file: import('./src/file-io.js').LoadedFile) => void} */
+function routeLoadedFile(file) {
+  if (!file) return;
+  const kind = file.kind || classifyFile(file.name);
+  if (kind === 'json') {
+    if (!instanceEditor) return;
+    setInstanceKind('json');
+    instanceEditor.setValue(file.text || '');
+    toggleInstancePane(true);
+    toast(`Loaded ${file.name || 'JSON file'} into instance editor`, 'success');
+  } else if (kind === 'cbor') {
+    if (!instanceEditor) return;
+    setInstanceKind('cbor');
+    instanceEditor.setValue(file.text || bytesToHex(file.bytes || new Uint8Array()));
+    toggleInstancePane(true);
+    toast(`Loaded ${file.name || 'CBOR file'} into instance editor`, 'success');
+  } else {
+    setMainEditorContent(file.text || '');
+    toast(`Loaded ${file.name || 'schema file'}`, 'success');
+  }
+}
+
+async function openFile() {
+  const file = await pickFile({ accept: '.cddl,.json,.cbor,application/json,application/cbor' });
+  if (!file) return;
+  routeLoadedFile(file);
+}
+
+function saveSchemaFile() {
+  if (!editor) return;
+  downloadText('schema.cddl', editor.getValue(), 'text/cddl;charset=utf-8');
+  toast('Downloaded schema.cddl', 'success');
+}
+
+function initFileIoFeature() {
+  try {
+    const openBtn = document.getElementById('openFileBtn');
+    const saveBtn = document.getElementById('saveFileBtn');
+    const dropOverlay = document.getElementById('dropOverlay');
+    if (openBtn) openBtn.addEventListener('click', openFile);
+    if (saveBtn) saveBtn.addEventListener('click', saveSchemaFile);
+    if (document.body) attachDropZone(document.body, dropOverlay, routeLoadedFile);
+  } catch (err) {
+    logFailure('file.initialization_failed', err);
+  }
+}
+
+// ─── Share ──────────────────────────────────────────────────────────────────
+
+function currentShareState() {
+  return {
+    cddl: editor?.getValue() || '',
+    instance: instanceEditor?.getValue() || '',
+    kind: instanceKind,
+  };
+}
+
+async function sharePlayground() {
+  const state = currentShareState();
+  if (isTooLargeToShare(state)) {
+    toast('Playground state is too large to share as a URL.', 'warning');
+    return;
+  }
+  const url = buildShareUrl(state);
+  const copied = await copyToClipboard(url);
+  toast(copied ? 'Copied share link' : 'Could not copy share link', copied ? 'success' : 'error');
+}
+
+function initShareFeature() {
+  try {
+    const shareBtn = document.getElementById('shareBtn');
+    if (shareBtn) shareBtn.addEventListener('click', sharePlayground);
+  } catch (err) {
+    logFailure('share.initialization_failed', err);
+  }
+}
+
+// ─── Toasts + Shortcuts ──────────────────────────────────────────────────────
+
+function shortcutsModalOpen() {
+  const modal = document.getElementById('shortcutsModal');
+  return Boolean(modal && modal.classList.contains('visible'));
+}
+
+function toggleProblemsPanel() {
+  if (!problemsPanel) return;
+  problemsPanel.classList.toggle('collapsed');
+  if (!problemsPanel.classList.contains('collapsed')) layoutPlaygroundEditors();
+}
+
+function toggleExamplesMenu() {
+  const examplesWrapper = document.getElementById('examplesWrapper');
+  if (examplesWrapper) examplesWrapper.classList.toggle('open');
+}
+
+function initShortcutFeature() {
+  try {
+    shortcutsController = initShortcutsModal({
+      btn: document.getElementById('shortcutsBtn'),
+      modal: document.getElementById('shortcutsModal'),
+      closeBtn: document.getElementById('shortcutsClose'),
+      bodyEl: document.getElementById('shortcutsBody'),
+    });
+  } catch (err) {
+    logFailure('shortcuts.initialization_failed', err);
+  }
+}
+
+// ─── Initialisation ────────────────────────────────────────────────────────────
+
+function boot() {
+  // Grab DOM refs
+  statusPill = document.getElementById('statusPill');
+  statusText = document.getElementById('statusText');
+  problemsPanel = document.getElementById('problemsPanel');
+  problemsBadge = document.getElementById('problemsBadge');
+  problemsBody = document.getElementById('problemsBody');
+  cursorPosition = document.getElementById('cursorPosition');
+
+  try {
+    initToasts(document.getElementById('toastContainer'));
+  } catch (err) {
+    logFailure('toast.initialization_failed', err);
+  }
+
+  let sharedState = null;
+  try {
+    sharedState = readStateFromLocation();
+    if (sharedState) clearLocationState();
+  } catch (err) {
+    logFailure('share.read_failed', err);
+  }
+
+  // Ref-check toggle
+  const refCheckTrack = document.getElementById('refCheckTrack');
+  try {
+    checkRefs = localStorage.getItem(REFS_CACHE_KEY) === 'true';
+  } catch (_) {
+    logStorageUnavailable('storage.reference_check');
+  }
+  if (checkRefs && refCheckTrack) refCheckTrack.classList.add('active');
+
+  const refCheckToggle = document.getElementById('refCheckToggle');
+  if (refCheckToggle)
+    refCheckToggle.addEventListener('click', () => {
+      checkRefs = !checkRefs;
+      if (refCheckTrack) refCheckTrack.classList.toggle('active', checkRefs);
+      try {
+        localStorage.setItem(REFS_CACHE_KEY, String(checkRefs));
+      } catch (_) {
+        // Preferences are optional when browser storage is unavailable.
+      }
+      if (editor) {
+        lastInput = '';
+        lastValidatedInput = null;
+        runValidation();
+      }
+    });
+
+  // Format-on-save toggle
+  const formatTrack = document.getElementById('formatTrack');
+  try {
+    formatOnSave = localStorage.getItem(FORMAT_CACHE_KEY) === 'true';
+  } catch (_) {
+    logStorageUnavailable('storage.format_preference');
+  }
+  if (formatOnSave && formatTrack) formatTrack.classList.add('active');
+
+  const formatToggle = document.getElementById('formatToggle');
+  if (formatToggle)
+    formatToggle.addEventListener('click', () => {
+      formatOnSave = !formatOnSave;
+      if (formatTrack) formatTrack.classList.toggle('active', formatOnSave);
+      try {
+        localStorage.setItem(FORMAT_CACHE_KEY, String(formatOnSave));
+      } catch (_) {
+        // Preferences are optional when browser storage is unavailable.
+      }
+    });
+
+  // Examples dropdown
+  const examplesWrapper = document.getElementById('examplesWrapper');
+  const examplesBtn = document.getElementById('examplesBtn');
+  const examplesDropdown = document.getElementById('examplesDropdown');
+
+  const ddFrag = document.createDocumentFragment();
+  for (const cat of EXAMPLES) {
+    const catEl = document.createElement('div');
+    catEl.className = 'examples-category';
+    catEl.textContent = cat.category;
+    ddFrag.appendChild(catEl);
+    for (const ex of cat.items) {
+      const item = document.createElement('div');
+      item.className = 'example-item';
+      item.innerHTML = `<span class="example-item-name">${escapeHtml(ex.name)}</span><span class="example-item-desc">${escapeHtml(ex.desc)}</span>`;
+      item.addEventListener('click', () => {
+        if (editor) {
+          editor.setValue(ex.source);
+          lastInput = '';
+          runValidation();
+        }
+        if (examplesWrapper) examplesWrapper.classList.remove('open');
+      });
+      ddFrag.appendChild(item);
+    }
+  }
+  if (examplesDropdown) examplesDropdown.appendChild(ddFrag);
+
+  if (examplesBtn && examplesWrapper)
+    examplesBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      examplesWrapper.classList.toggle('open');
+    });
+
+  document.addEventListener('click', (e) => {
+    if (examplesWrapper && e.target instanceof Node && !examplesWrapper.contains(e.target)) {
+      examplesWrapper.classList.remove('open');
+    }
+  });
+
+  // Theme toggle
+  try {
+    const saved = localStorage.getItem(THEME_CACHE_KEY);
+    if (saved === 'light') isDark = false;
+  } catch (_) {
+    logStorageUnavailable('storage.theme_preference');
+  }
+  if (!isDark) document.body.classList.add('light');
+
+  const themeToggle = document.getElementById('themeToggle');
+  if (themeToggle)
+    themeToggle.addEventListener('click', () => {
+      isDark = !isDark;
+      document.body.classList.toggle('light', !isDark);
+      if (editor) {
+        monaco.editor.setTheme(isDark ? 'cddl-dark' : 'cddl-light');
+      }
+      try {
+        localStorage.setItem(THEME_CACHE_KEY, isDark ? 'dark' : 'light');
+      } catch (_) {
+        logStorageUnavailable('storage.theme_save');
+      }
+    });
+
+  const container = document.getElementById('cddlEditor');
+  if (!container) return;
+
+  // Create editor
+  editor = monaco.editor.create(container, {
+    value: typeof sharedState?.cddl === 'string' ? sharedState.cddl : loadContent(),
+    language: 'cddl',
+    theme: isDark ? 'cddl-dark' : 'cddl-light',
+    fontSize: 14,
+    lineHeight: 22,
+    fontFamily: "'JetBrains Mono', 'Monaco', 'Menlo', 'Consolas', monospace",
+    fontLigatures: true,
+    minimap: { enabled: false },
+    scrollBeyondLastLine: false,
+    automaticLayout: false,
+    wordWrap: 'on',
+    wrappingIndent: 'indent',
+    lineNumbers: 'on',
+    glyphMargin: true,
+    folding: true,
+    renderLineHighlight: 'line',
+    cursorBlinking: 'smooth',
+    cursorSmoothCaretAnimation: 'on',
+    smoothScrolling: true,
+    bracketPairColorization: { enabled: true },
+    guides: { bracketPairs: 'active', indentation: true },
+    padding: { top: 12, bottom: 12 },
+    hover: { enabled: 'on', delay: 300, sticky: true },
+  });
+
+  // Expose globally for convenience
+  window.editor = editor;
+
+  initInstanceFeature(sharedState);
+  initOutlineFeature();
+  initFileIoFeature();
+  initShareFeature();
+  initShortcutFeature();
+  refreshSchemaFeatures();
+  if (sharedState) toast('Loaded shared playground', 'success');
+
+  // Cursor position in status bar
+  editor.onDidChangeCursorPosition((e) => {
+    if (cursorPosition)
+      cursorPosition.textContent = `Ln ${e.position.lineNumber}, Col ${e.position.column}`;
+  });
+
+  // Intercept playground shortcuts globally. Keep Mod+S single-handled here.
+  window.addEventListener('keydown', (e) => {
+    const key = e.key.toLowerCase();
+    const mod = e.ctrlKey || e.metaKey;
+
+    if (mod && !e.shiftKey && !e.altKey && key === 's') {
+      e.preventDefault();
+      if (formatOnSave) applyFormat();
+      return;
+    }
+
+    if (shortcutsModalOpen()) return;
+
+    if (mod && !e.shiftKey && !e.altKey && key === 'enter') {
+      e.preventDefault();
+      validateCurrentInstance();
+    } else if (mod && !e.shiftKey && !e.altKey && key === 'k') {
+      e.preventDefault();
+      toggleExamplesMenu();
+    } else if (mod && !e.shiftKey && !e.altKey && key === 'o') {
+      e.preventDefault();
+      openFile();
+    } else if (mod && e.shiftKey && !e.altKey && key === 's') {
+      e.preventDefault();
+      saveSchemaFile();
+    } else if (mod && e.shiftKey && !e.altKey && key === 'c') {
+      e.preventDefault();
+      sharePlayground();
+    } else if (mod && !e.shiftKey && !e.altKey && key === 'b') {
+      e.preventDefault();
+      toggleOutlinePane();
+    } else if (mod && !e.shiftKey && !e.altKey && key === 'i') {
+      e.preventDefault();
+      toggleInstancePane();
+    } else if (mod && !e.shiftKey && !e.altKey && key === 'j') {
+      e.preventDefault();
+      toggleProblemsPanel();
+    }
+  });
+
+  // Real-time validation
+  editor.onDidChangeModelContent(scheduleValidation);
+
+  // Problems panel toggle
+  const problemsHeader = document.getElementById('problemsHeader');
+  if (problemsHeader) problemsHeader.addEventListener('click', toggleProblemsPanel);
+
+  // Problems panel resize
+  const resizeHandle = document.getElementById('resizeHandle');
+
+  if (resizeHandle)
+    resizeHandle.addEventListener('mousedown', (e) => {
+      if (problemsPanel && problemsPanel.classList.contains('collapsed')) return;
+      e.preventDefault();
+      resizeHandle.classList.add('active');
+      document.body.style.cursor = 'ns-resize';
+      document.body.style.userSelect = 'none';
+
+      const startY = e.clientY;
+      const startHeight = problemsPanel ? problemsPanel.offsetHeight : 0;
+
+      let rafId = 0;
+      /** @param {MouseEvent} ev */
+      function onMouseMove(ev) {
+        cancelAnimationFrame(rafId);
+        rafId = requestAnimationFrame(() => {
+          const delta = startY - ev.clientY;
+          const newHeight = Math.max(33, Math.min(startHeight + delta, window.innerHeight * 0.7));
+          if (problemsPanel) problemsPanel.style.height = newHeight + 'px';
+          layoutPlaygroundEditors();
+        });
+      }
+
+      function onMouseUp() {
+        resizeHandle?.classList.remove('active');
+        document.body.style.cursor = '';
+        document.body.style.userSelect = '';
+        document.removeEventListener('mousemove', onMouseMove);
+        document.removeEventListener('mouseup', onMouseUp);
+      }
+
+      document.addEventListener('mousemove', onMouseMove);
+      document.addEventListener('mouseup', onMouseUp);
+    });
+
+  // Window resize (throttled)
+  let resizeRaf = 0;
+  window.addEventListener('resize', () => {
+    cancelAnimationFrame(resizeRaf);
+    resizeRaf = requestAnimationFrame(layoutPlaygroundEditors);
+  });
+
+  // Initial layout + focus so keyboard shortcuts work immediately
+  layoutPlaygroundEditors();
+  editor.focus();
+
+  // Init WASM then validate
+  initWasm().then((ok) => {
+    if (ok) {
+      setInstanceKind(instanceKind);
+      runValidation();
+    } else {
+      if (statusPill) statusPill.className = 'status-pill invalid';
+      if (statusText) statusText.textContent = 'WASM failed';
+    }
+  });
+}
+
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', boot);
+} else {
+  boot();
+}
+
+// Expose jump helper globally (used by inline onclick)
+window.jumpToError = jumpTo;
+window.editor = editor;
+window.addEventListener('pagehide', (event) => {
+  if (event.persisted) return;
+  shortcutsController?.dispose();
+  navigationDisposer?.();
+});

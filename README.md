@@ -1,0 +1,776 @@
+# cddl-rs
+
+[![crates.io](https://img.shields.io/crates/v/cddl.svg)](https://crates.io/crates/cddl) [![docs.rs](https://docs.rs/cddl/badge.svg)](https://docs.rs/cddl) [![Build and Test](https://github.com/anweiss/cddl/workflows/Build%20and%20Test/badge.svg)](https://github.com/anweiss/cddl/actions?query=workflow%3A%22Build+and+Test%22) [![Active Development](https://img.shields.io/badge/Maintenance%20Level-Actively%20Developed-brightgreen.svg)](https://gist.github.com/cheerfulstoic/d107229326a01ff0f333a1d3476e068d)
+
+A Rust implementation of the Concise data definition language (CDDL). CDDL is an IETF standard that "proposes a notational convention to express CBOR and JSON data structures." As of 2019-06-12, it is published as RFC 8610 (Proposed Standard) at [https://tools.ietf.org/html/rfc8610](https://tools.ietf.org/html/rfc8610).
+
+This crate supports the following CDDL-related RFCs:
+
+| RFC | Title | Status |
+| --- | ----- | ------ |
+| [RFC 8610](https://datatracker.ietf.org/doc/html/rfc8610) | Concise Data Definition Language (CDDL) | ✔️ Full parsing and validation |
+| [RFC 9165](https://datatracker.ietf.org/doc/html/rfc9165) | Additional Control Operators for CDDL | ✔️ `.cat` , `.det` , `.plus` , `.abnf` , `.abnfb` , `.feature` |
+| [RFC 9682](https://datatracker.ietf.org/doc/html/rfc9682) | Updates to CDDL (Empty Data Models, `\u{hex}` Escapes, Non-Literal Tag Numbers) | ✔️ Full grammar and parser support |
+| [RFC 9741](https://datatracker.ietf.org/doc/html/rfc9741) | Additional Control Operators for Text in CDDL | ✔️ `.b64u` , `.b64c` , `.hex` , `.hexlc` , `.hexuc` , `.b32` , `.h32` , `.b45` , `.base10` , `.printf` , `.json` , `.join` and sloppy variants |
+| [draft-bormann-cbor-cddl-csv-08](https://datatracker.ietf.org/doc/draft-bormann-cbor-cddl-csv/08/) | Using CDDL for CSV | ✔️ CSV validation via generic data model mapping |
+| [draft-bormann-cbor-cddl-freezer-17](https://datatracker.ietf.org/doc/html/draft-bormann-cbor-cddl-freezer-17) | CDDL Feature Freezer | ✔️ `.pcre` (PCRE2), `.iregexp` (RFC 9485), `.bitfield` |
+| [draft-ietf-cbor-cddl-modules-07](https://datatracker.ietf.org/doc/draft-ietf-cbor-cddl-modules/07/) | CDDL Module Structure | ✔️ `;#` directives, `import` / `include`, `from` selection and `as` namespacing — behind the default-off `modules` feature |
+
+This crate uses [Pest](https://pest.rs/) (a PEG parser generator for Rust) to parse CDDL. The grammar is defined in [ `cddl.pest` ](cddl.pest) and closely follows the ABNF grammar in [Appendix B.](https://tools.ietf.org/html/rfc8610#appendix-B) of the spec. All CDDL must use UTF-8 for its encoding per the spec.
+
+This crate supports validation of CBOR, JSON, and CSV data structures. The minimum supported Rust version (MSRV) is 1.88.0.
+
+Also bundled into this repository is a basic language server implementation and extension for Visual Studio Code for editing CDDL. The implementation is backed by the compiled WebAssembly target included in this crate.
+
+## Contributing and local development
+
+With Rust stable, Node 24 LTS and Python 3.11+ installed, run `npm run setup`.
+See [agent guidance](AGENTS.md), [development commands](docs/development.md),
+[architecture](docs/architecture.md), [interactive QA](docs/qa.md) and
+[security and privacy](SECURITY.md). No application credentials or services are required.
+
+## Goals
+
+* [x] Parse CDDL documents into an AST
+* [x] Verify conformance of CDDL documents against RFC 8610
+* [x] Validate CBOR data structures
+* [x] Validate JSON documents
+* [x] Validate CSV data
+* [x] Generate Rust types from CDDL
+* [ ] Generate dummy JSON from conformant CDDL
+* [x] As close to zero-copy as possible
+* [x] Compile WebAssembly target for browser and Node.js
+* [x] `no_std` support (lexing and parsing only)
+* [x] Language server implementation and Visual Studio Code Extension
+
+## Non-goals
+
+* Support CBOR diagnostic notation
+* I-JSON compatibility
+
+## Used in
+
+This crate is used in several notable projects:
+
+| Project | Description |
+| ------- | ----------- |
+| [google/cddlconv](https://github.com/google/cddlconv) | A command-line utility for converting CDDL to TypeScript and Zod schemas |
+| [input-output-hk/catalyst-core](https://github.com/input-output-hk/catalyst-core) | Core Catalyst governance engine for Cardano, uses this crate for CBOR validation of CIP-36 voter registration data |
+
+## Why Rust?
+
+Rust is a systems programming language designed around safety and is ideally-suited for resource-constrained systems. CDDL and CBOR are designed around small code and message sizes and constrained nodes, scenarios for which Rust has also been designed.
+
+## CLI
+
+A CLI is available for various platforms. The tool supports parsing of CDDL files for verifying conformance against RFC 8610. It can also be used to validate JSON documents, CBOR binary files, and CSV files against CDDL documents. Detailed information about the JSON, CBOR, and CSV validation implementation can be found in the sections below.
+
+### Installation
+
+#### GitHub Releases
+
+Binaries for Linux, macOS and Windows can be downloaded from GitHub [Releases](https://github.com/anweiss/cddl/releases).
+
+#### Cargo
+
+```sh
+cargo install cddl
+```
+
+#### Docker
+
+```sh
+docker pull ghcr.io/anweiss/cddl-cli:latest
+```
+
+### CLI usage
+
+Instructions for using the tool can be viewed by executing the `help` subcommand:
+
+```sh
+cddl help
+```
+
+If using Docker:
+
+> Replace `<version>` with an appropriate [release](https://github.com/anweiss/cddl/releases) tag. Requires use of the `--volume` argument for mounting CDDL documents into the container when executing the command. JSON or CBOR files can either be included in the volume mount or passed into the command via STDIN.
+
+```sh
+docker run -it --rm -v $PWD:/cddl -w /cddl ghcr.io/anweiss/cddl-cli:<version> help
+```
+
+You can validate JSON documents, CBOR binary files, and/or CSV files:
+
+```sh
+cddl validate [OPTIONS] --cddl <CDDL> <--stdin|--json <JSON>...|--cbor <CBOR>...|--csv <CSV>...>
+```
+
+For CSV files, use the `--csv-header` flag if the first row is a header:
+
+```sh
+cddl validate --cddl schema.cddl --csv data.csv --csv-header
+```
+
+It also supports validating files from STDIN (if it detects the input as valid UTF-8, it will attempt to validate the input as JSON, otherwise it will treat it as CBOR):
+
+```sh
+cat reputon.json | cddl validate --cddl reputon.cddl --stdin
+cat reputon.cbor | cddl validate --cddl reputon.cddl --stdin
+```
+
+or using Docker:
+
+```sh
+docker run -i --rm -v $PWD:/data -w /data ghcr.io/anweiss/cddl-cli:0.10.7 validate --cddl reputon.cddl --stdin < reputon.json
+```
+
+## Website
+
+A browser-based CDDL playground is available at [https://cddl.anweiss.tech](https://cddl.anweiss.tech), built on this same codebase compiled to WebAssembly. Beyond RFC 8610 conformance checking, it provides:
+
+* **Editing** — syntax highlighting, autocompletion over the rules defined in the current document plus the RFC 8610 Appendix D prelude and the supported control operators, formatting, find/replace and comment toggling.
+* **Diagnostics** — a Problems panel listing parser errors, and an optional check for references to undefined rules.
+* **Instance validation** — validate a JSON or CBOR instance against the schema, using a chosen root rule. CBOR can be pasted as hex or base64.
+* **Sample generation** — generate a sample JSON instance from the schema; when the WebAssembly validator is available, samples are validated back against the schema and any that do not conform are flagged.
+* **Outline** — a filterable list of the rules in the document, distinguishing types, groups and sockets/plugs.
+* **Files and sharing** — open and save `.cddl`, `.json` and `.cbor` files, including by drag-and-drop, and share the current schema and instance via a URL.
+* **Examples** — a built-in set covering basic types, arrays, choices, generics, sockets/plugs, constrained strings, tagged CBOR, occurrence indicators, JWT and COSE keys.
+
+Keyboard shortcuts are listed in-app under **Shortcuts**.
+
+## Visual Studio Code extension
+
+An extension for editing CDDL documents with Visual Studio Code has been published to the Marketplace [here](https://marketplace.visualstudio.com/items?itemName=anweiss.cddl-languageserver). You can find more information in the [README](cddl-lsp/README.md).
+
+## Supported features
+
+* [x] maps
+  + [x] structs
+  + [x] tables
+  + [x] cuts
+* [x] groups
+* [x] arrays
+* [x] values
+* [x] choices
+* [x] ranges
+* [x] enumeration (building a choice from a group)
+* [x] root type
+* [x] occurrence
+* [x] predefined types
+* [x] tags
+* [x] unwrapping
+* [x] controls
+* [x] socket/plug
+* [x] generics
+* [x] operator precedence
+* [x] comments
+* [x] numerical int/uint values
+* [x] numerical hexfloat values
+* [x] numerical values with exponents
+* [x] unprefixed byte strings
+* [x] prefixed byte strings
+
+## Module structure (experimental)
+
+Behind the default-off `modules` feature, this crate implements the CDDL module
+structure of
+[draft-ietf-cbor-cddl-modules-07](https://datatracker.ietf.org/doc/draft-ietf-cbor-cddl-modules/07/).
+Revision 07 (2 September 2026, expires 6 March 2027) retains the directive
+grammar and resolution semantics of revision 06.
+Directives are carried in comments beginning with `;#`, so a module-structured
+document remains valid basic CDDL for tools that do not understand them.
+
+### Directives
+
+| Directive | Effect |
+| --- | --- |
+| `;# import <module>` | Bring in the rules of `<module>` this document actually references, transitively. |
+| `;# import <module> as <ns>` | As above, with each imported rule prefixed `<ns>.`. Prelude names are never prefixed. |
+| `;# include <module>` | Bring in every rule of `<module>`. |
+| `;# include <names> from <module>` | Bring in exactly the rules named, without their dependencies. |
+| `;# import <name> from <module> as <ns>` | Bring in `<name>` under the `<ns>.` prefix, and emit an alias so the unprefixed name resolves too. |
+| `;# include * from <module>` | `*` selects every rule of the module. |
+
+Names in a `from` clause may be written with or without the namespace prefix.
+Modules may themselves carry directives; they are resolved transitively, and
+circular references are reported rather than followed.
+
+### Example
+
+Given a module `rfc9052.cddl` on the search path:
+
+```cddl
+COSE_Key = {
+  1 => tstr / int,
+  ? 2 => bstr,
+  * label => values,
+}
+label = int / tstr
+values = any
+```
+
+this document:
+
+```cddl
+start = cose.COSE_Key
+;# import rfc9052 as cose
+```
+
+resolves to:
+
+```cddl
+start = cose.COSE_Key
+cose.COSE_Key = {
+  1 => tstr / int,
+  ? 2 => bstr,
+  * cose.label => cose.values,
+}
+cose.label = int / tstr
+cose.values = any
+```
+
+### Library
+
+Resolution is a source-to-source transformation into basic RFC 8610 CDDL,
+matching the behavior of the `cddlc -2tcddl` tool described in Appendix B of the
+draft. `ResolvedCddl` owns the resolved text and exposes an AST borrowing it:
+
+```rust
+use cddl::modules::{ResolvedCddl, FsModuleSource, ResolveOptions};
+
+let input = "start = cose.COSE_Key\n;# import rfc9052 as cose\n";
+let document = ResolvedCddl::resolve(
+  input,
+  &FsModuleSource::from_env(),
+  &ResolveOptions::default(),
+)?;
+let ast = document.parse()?;
+```
+
+The document outlives its input and module source; keep it alive while using
+the AST. `resolve()` reports module errors, while `parse()` checks the root's
+basic CDDL syntax without checking that every rule reference is defined.
+`text()` borrows the resolved text. The existing `resolve_modules()` function
+remains available to callers that only need a `String`.
+
+On native targets, `validate_json()` and `validate_cbor()` validate data against
+the document when their respective `json` or `cbor` feature is enabled and `lsp`
+is disabled. Their optional `enabled_features` argument is present only with
+`additional-controls`, matching the existing validator APIs. These helpers
+return errors without writing diagnostics to stderr. Malformed CBOR produces
+`CBORParsing`, distinct from `CDDLParsing` for malformed schema syntax.
+
+Modules are located by filename along `CDDL_INCLUDE_PATH`, whose elements are
+separated by `:` on Unix and by `;` on Windows, where `:` occurs in drive-letter
+paths. It defaults to `.:` (`.;` on Windows). Targets without a filesystem (such as
+`wasm32-unknown-unknown`) can supply modules through the `ModuleSource` trait;
+`MemoryModuleSource` is provided for that purpose.
+
+Each loaded module is parsed after resolution, so a module that is not valid
+CDDL is reported as an error rather than silently producing a broken document.
+The same check applies on native and WASM targets.
+
+No RFC module collection is bundled; empty search-path elements are skipped.
+The playground UI and language-server integration do not yet use module
+resolution. Resolution removes directives rather than preserving them in the
+AST. Directive-like text inside literals is preserved.
+
+### JavaScript / WASM
+
+WASM builds with `modules` and `std` enabled export `resolve_cddl_modules()`.
+Supply an object mapping module names to CDDL strings; no filesystem or network
+access is performed:
+
+```javascript
+const resolved = resolve_cddl_modules(
+  ';# import numbers as n\n',
+  { numbers: 'value = uint\n' },
+  'n.value',
+);
+```
+
+The optional third argument selects the start rule, as with
+`ResolveOptions::start_rule`. Pass the returned basic CDDL string to the existing
+parser or validator WASM exports. Invalid module maps return a generic error
+without exposing their contents. This standalone API does not enable module
+resolution automatically in the playground UI or language server.
+
+### CLI
+
+```sh
+cddl resolve-modules --cddl schema.cddl
+```
+
+The document may also be piped in on stdin. The `-i` and `-s` shortcuts of §2.7
+are supported, which import a module and emit a start rule without editing the
+document:
+
+```sh
+cddl resolve-modules -icose=rfc9052 -scose.COSE_Key
+```
+
+`--include-path` overrides the module search path for a single invocation.
+
+### Stability
+
+Being an unratified draft, this is gated off by default and its output is not
+covered by semantic versioning guarantees. Two deliberate deviations from the
+Appendix A ABNF are documented in the source: identifiers accept `.` and `-`
+(required, since the draft's own examples use `cose.label`), and `.` and `..`
+are rejected as module names.
+
+## Usage
+
+Simply add the dependency to `Cargo.toml` :
+
+```toml
+[dependencies]
+cddl = "0.10.7"
+```
+
+JSON, CBOR, and CSV validation all require `std` .
+
+### Feature flags
+
+A few convenience features have been included to make the AST more concise and for enabling additional functionality. You can build with `default-features = false` for a `no_std` build and selectively enable any of the features below.
+
+**`--feature ast-span`**
+
+Add the `Span` type to the AST for keeping track of the position of the lexer and parser. Enabled by default.
+
+**`--feature ast-comments`**
+
+Include comment strings in the AST. Enabled by default.
+
+**`--feature ast-parent`**
+
+Add the `ParentVisitor` implementation so that the AST can be traversed using parent pointers. Enabled by default.
+
+**`--feature json`**
+
+Enable JSON validation. Enabled by default.
+
+**`--feature cbor`**
+
+Enable CBOR validation. Enabled by default.
+
+**`--feature csv-validate`**
+
+Enable CSV validation per [draft-bormann-cbor-cddl-csv-08](https://datatracker.ietf.org/doc/draft-bormann-cbor-cddl-csv/08/). Enabled by default.
+
+**`--feature additional-controls`**
+
+Enable validation support for the additional control operators defined in [RFC 9165](https://datatracker.ietf.org/doc/html/rfc9165) and [RFC 9741](https://datatracker.ietf.org/doc/html/rfc9741). Enabled by default.
+
+**`--feature freezer`**
+
+Enable control operators from the [CDDL Feature Freezer](https://datatracker.ietf.org/doc/html/draft-bormann-cbor-cddl-freezer-17) draft. Enabled by default. Includes:
+
+- `.pcre` — PCRE2 regular expressions via `fancy-regex` (supports lookahead, lookbehind, backreferences). Patterns are anchored on both sides per the spec.
+- `.iregexp` — [RFC 9485](https://datatracker.ietf.org/doc/html/rfc9485) interoperable regular expressions. Anchored matching.
+- `.bitfield` — Structured bitfield validation for unsigned integers. The controller is an array of bit widths; the validator checks that the uint value fits within the total declared bit width.
+
+### Parsing CDDL
+
+```rust
+use cddl::parser::cddl_from_str;
+
+let input = r#"myrule = int"#;
+assert!(cddl_from_str(input, true).is_ok())
+```
+
+### Generating Rust types from CDDL
+
+The [`cddl-codegen-rust`](cddl-codegen-rust/) library generates Rust source at runtime or
+from build scripts:
+
+```toml
+[dependencies]
+cddl-codegen-rust = "0.1"
+```
+
+```rust
+use cddl_codegen_rust::{generate_rust_code, CodegenError};
+
+fn generate(schema: &str) -> Result<String, CodegenError> {
+  generate_rust_code(schema)
+}
+```
+
+For tools that combine or transform schemas, parse them with the re-exported
+`cddl_codegen_rust::cddl`, then pass the resulting AST to
+`generate_rust_code_from_ast`. Pass the original source
+for an unchanged AST, or `""` for ASTs combined from multiple documents (using
+AST-attached documentation only). The caller chooses conflict and merge
+policies; see the library's example. Generated code needs the same Serde
+dependencies as the macros described below.
+
+The companion crate [`cddl-derive`](cddl-derive/) provides proc macros for generating Rust types from CDDL definitions at compile time.
+
+```toml
+[dependencies]
+cddl-derive = "0.1"
+serde = { version = "1", features = ["derive"] }
+```
+
+#### Attribute macro — single struct
+
+Apply `#[cddl(path = "...")]` to a stub struct. The macro reads the CDDL file,
+finds the matching rule (by converting the struct name from PascalCase to
+kebab-case), and replaces the struct with fully populated fields:
+
+```rust,ignore
+use cddl_derive::cddl;
+
+// schema.cddl contains: person = { name: tstr, age: uint, ? email: tstr }
+#[cddl(path = "schema.cddl")]
+struct Person;
+```
+
+This expands at compile time to:
+
+```rust
+use serde::{Deserialize, Serialize};
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct Person {
+    pub name: String,
+    pub age: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
+}
+```
+
+Use the `rule` attribute to target a specific CDDL rule name when the struct
+name does not match:
+
+```rust,ignore
+#[cddl(path = "schema.cddl", rule = "person-record")]
+struct MyPerson;
+```
+
+#### Function-like macro — all types
+
+`cddl_typegen!` generates Rust types for every rule in a CDDL file:
+
+```rust,ignore
+use cddl_derive::cddl_typegen;
+
+cddl_typegen!("schema.cddl");
+// Generates: struct Person { ... }, struct Address { ... }, etc.
+```
+
+#### Supported CDDL-to-Rust mappings
+
+| CDDL construct | Rust output |
+| --- | --- |
+| Map types `{ key: type, ... }` | `struct` with named fields |
+| Type choices `a / b / c` | `enum` with variants |
+| Simple type references `foo = tstr` | `type` alias |
+| Array types `[* T]` | `Vec<T>` |
+| Table types `{ * tstr => T }` | `HashMap<String, T>` |
+| Optional fields `? key: type` | `Option<T>` with `skip_serializing_if` |
+| Nullable types `T / null` | `Option<T>` |
+| Hyphenated names `my-field` | snake_case field + `#[serde(rename = "my-field")]` |
+| Rust keywords `type`, `match` | Escaped with trailing `_` + serde rename |
+
+All standard prelude types (`tstr`, `uint`, `int`, `float`, `bstr`, `bool`, `null`, `any`, etc.) are mapped to their idiomatic Rust equivalents. All generated types include `Serialize` and `Deserialize` derives for use with Serde.
+
+### Validating JSON
+
+```rust
+use cddl::validate_json_from_str;
+
+let cddl = r#"person = {
+  name: tstr,
+  age: uint,
+  address: tstr,
+}"#;
+
+let json = r#"{
+  "name": "John",
+  "age": 50,
+  "address": "1234 Lakeshore Dr"
+}"#;
+
+assert!(validate_json_from_str(cddl, json).is_ok())
+```
+
+This crate uses the [Serde](https://serde.rs/) framework, and more specifically, the [serde_json](https://crates.io/crates/serde_json) crate, for parsing and validating JSON. Serde was chosen due to its maturity in the ecosystem and its support for serializing and deserializing CBOR via the [ciborium](https://crates.io/crates/ciborium) crate.
+
+As outlined in [Appendix E.](https://tools.ietf.org/html/rfc8610#appendix-E) of the standard, only the JSON data model subset of CBOR can be used for validation. The limited prelude from the spec has been included below for brevity:
+
+```cddl
+any = #
+
+uint = #0
+nint = #1
+int = uint / nint
+
+tstr = #3
+text = tstr
+
+number = int / float
+
+float16 = #7.25
+float32 = #7.26
+float64 = #7.27
+float16-32 = float16 / float32
+float32-64 = float32 / float64
+float = float16-32 / float64
+
+false = #7.20
+true = #7.21
+bool = false / true
+nil = #7.22
+null = nil
+```
+
+Furthermore, the following data types from the standard prelude can be used for validating JSON strings and numbers:
+
+```cddl
+tdate = #6.0(tstr)
+uri = #6.32(tstr)
+b64url = #6.33(tstr)
+time = #6.1(number)
+```
+
+The first non-group rule defined by a CDDL data structure definition determines the root type, which is subsequently used for validating the top-level JSON data type.
+
+#### Supported JSON validation features
+
+The following types and features of CDDL are supported by this crate for validating JSON:
+
+| CDDL                   | JSON                                                        |
+| ---------------------- | ----------------------------------------------------------- |
+| structs                | objects                                                     |
+| arrays                 | arrays<sup>[1](#arrays)</sup>                               |
+| `text / tstr` | string                                                      |
+| `uri` | string (valid RFC3986 URI)                                  |
+| `tdate` | string (valid RFC3339 date/time)                            |
+| `b64url` | string (base64url-encoded)                                  |
+| `time` | number (valid UNIX timestamp integer in seconds)            |
+| `number / int / float` | number<sup>[2](#number)</sup>                               |
+| `bool / true / false` | boolean                                                     |
+| `null / nil` | null                                                        |
+| `any` | any valid JSON                                              |
+| byte strings           | not yet implemented                                         |
+| unwrap ( `~` )           | any JSON that matches unwrapped type from map, array or tag |
+
+CDDL groups, generics, sockets/plugs and group-to-choice enumerations can all be used when validating JSON.
+
+Since JSON objects only support keys whose types are JSON strings, when validating JSON, member keys defined in CDDL structs must use either the colon syntax ( `mykey: tstr` or `"mykey": tstr` ) or the double arrow syntax provided that the member key is either a text string value ( `"mykey" => tstr` ) or a bareword that resolves to either a string data type ( `text` or `tstr` ) or another text string value ( `* tstr => any` ).
+
+Occurrence indicators can be used to validate key/value pairs in a JSON object and the number of elements in a JSON array; depending on how the indicators are defined in a CDDL data definition.
+
+Below is the table of supported control operators:
+
+| Control operator | Supported                                                                                                                                                                                   |
+| ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `.pcre` | <g-emoji class="g-emoji" alias="heavy_check_mark" fallback-src="https://github.githubassets.com/images/icons/emoji/unicode/2714.png">✔️</g-emoji><sup>[3](#regex)</sup>                     |
+| `.regex` | <g-emoji class="g-emoji" alias="heavy_check_mark" fallback-src="https://github.githubassets.com/images/icons/emoji/unicode/2714.png">✔️</g-emoji><sup>[3](#regex)</sup> (alias for `.pcre` ) |
+| `.size` | <g-emoji class="g-emoji" alias="heavy_check_mark" fallback-src="https://github.githubassets.com/images/icons/emoji/unicode/2714.png">✔️</g-emoji>                                           |
+| `.bits` | Ignored when validating JSON                                                                                                                                                                |
+| `.cbor` | Ignored when validating JSON                                                                                                                                                                |
+| `.cborseq` | Ignored when validating JSON                                                                                                                                                                |
+| `.within` | <g-emoji class="g-emoji" alias="heavy_check_mark" fallback-src="https://github.githubassets.com/images/icons/emoji/unicode/2714.png">✔️</g-emoji>                                           |
+| `.and` | <g-emoji class="g-emoji" alias="heavy_check_mark" fallback-src="https://github.githubassets.com/images/icons/emoji/unicode/2714.png">✔️</g-emoji>                                           |
+| `.lt` | <g-emoji class="g-emoji" alias="heavy_check_mark" fallback-src="https://github.githubassets.com/images/icons/emoji/unicode/2714.png">✔️</g-emoji>                                           |
+| `.le` | <g-emoji class="g-emoji" alias="heavy_check_mark" fallback-src="https://github.githubassets.com/images/icons/emoji/unicode/2714.png">✔️</g-emoji>                                           |
+| `.gt` | <g-emoji class="g-emoji" alias="heavy_check_mark" fallback-src="https://github.githubassets.com/images/icons/emoji/unicode/2714.png">✔️</g-emoji>                                           |
+| `.ge` | <g-emoji class="g-emoji" alias="heavy_check_mark" fallback-src="https://github.githubassets.com/images/icons/emoji/unicode/2714.png">✔️</g-emoji>                                           |
+| `.eq` | <g-emoji class="g-emoji" alias="heavy_check_mark" fallback-src="https://github.githubassets.com/images/icons/emoji/unicode/2714.png">✔️</g-emoji>                                           |
+| `.ne` | <g-emoji class="g-emoji" alias="heavy_check_mark" fallback-src="https://github.githubassets.com/images/icons/emoji/unicode/2714.png">✔️</g-emoji>                                           |
+| `.default` | <g-emoji class="g-emoji" alias="heavy_check_mark" fallback-src="https://github.githubassets.com/images/icons/emoji/unicode/2714.png">✔️</g-emoji>                                           |
+
+<a name="arrays">1</a>: When groups with multiple group entries are used to validate arrays, occurrence indicators are "greedy" in that only the first occurrence indicator that is come across is used in the validation. Subsequent entries with occurrence indicators are ignored due to complexities involved with processing these ambiguities. For proper JSON validation, avoid writing CDDL that looks like the following: `[ * a: int, b: tstr, ? c: int ]` .
+
+<a name="number">2</a>: While JSON itself does not distinguish between integers and floating-point numbers, this crate does provide the ability to validate numbers against a more specific numerical CBOR type, provided that its equivalent representation is allowed by JSON. Refer to [Appendix E.](https://tools.ietf.org/html/rfc8610#appendix-E) of the standard for more details on the implications of using CDDL with JSON numbers.
+
+<a name="regex">3</a>: Due to Perl-Compatible Regular Expressions (PCREs) being more widely used than XSD regular expressions, this crate also provides support for the `.pcre` control operator from the [CDDL Feature Freezer](https://datatracker.ietf.org/doc/html/draft-bormann-cbor-cddl-freezer-17). When the `freezer` feature is enabled, `.pcre` uses the `fancy-regex` crate for full PCRE2 support (lookahead, lookbehind, backreferences). Patterns are anchored on both sides per the spec. When `freezer` is disabled, `.pcre` falls back to the same XSD regex engine as `.regexp`.
+
+If you've enabled the `additional-controls` feature, the control operators from RFC 9165 below are also available for use:
+
+| Control operator | Supported                                                                                                                                         |
+| ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `.plus` | <g-emoji class="g-emoji" alias="heavy_check_mark" fallback-src="https://github.githubassets.com/images/icons/emoji/unicode/2714.png">✔️</g-emoji> |
+| `.cat` | <g-emoji class="g-emoji" alias="heavy_check_mark" fallback-src="https://github.githubassets.com/images/icons/emoji/unicode/2714.png">✔️</g-emoji> |
+| `.det` | <g-emoji class="g-emoji" alias="heavy_check_mark" fallback-src="https://github.githubassets.com/images/icons/emoji/unicode/2714.png">✔️</g-emoji> |
+| `.abnf` | <g-emoji class="g-emoji" alias="heavy_check_mark" fallback-src="https://github.githubassets.com/images/icons/emoji/unicode/2714.png">✔️</g-emoji> |
+| `.abnfb` | Ignored when validating JSON                                                                                                                      |
+| `.feature` | <g-emoji class="g-emoji" alias="heavy_check_mark" fallback-src="https://github.githubassets.com/images/icons/emoji/unicode/2714.png">✔️</g-emoji> |
+
+The text content control operators from RFC 9741 are also available:
+
+| Control operator | Supported |
+| ---------------- | --------- |
+| `.b64u` | ✔️ Validates base64url-encoded text against byte string controller |
+| `.b64u-sloppy` | ✔️ Lenient base64url decoding (tolerates non-zero trailing bits and padding) |
+| `.b64c` | ✔️ Validates base64 classic-encoded text against byte string controller |
+| `.b64c-sloppy` | ✔️ Lenient base64 classic decoding |
+| `.hex` | ✔️ Validates hex-encoded text (case-insensitive) |
+| `.hexlc` | ✔️ Validates lowercase hex-encoded text |
+| `.hexuc` | ✔️ Validates uppercase hex-encoded text |
+| `.b32` | ✔️ Validates base32-encoded text |
+| `.h32` | ✔️ Validates base32hex-encoded text |
+| `.b45` | ✔️ Validates base45-encoded text |
+| `.base10` | ✔️ Validates decimal integer text representation |
+| `.printf` | ✔️ Validates text against printf-style format string with arguments |
+| `.json` | ✔️ Validates text as JSON matching a CDDL type |
+| `.join` | ✔️ Validates text as concatenation of array element values |
+
+If you've enabled the `freezer` feature, the control operators from the [CDDL Feature Freezer](https://datatracker.ietf.org/doc/html/draft-bormann-cbor-cddl-freezer-17) draft are also available:
+
+| Control operator | Supported |
+| ---------------- | --------- |
+| `.pcre` | ✔️ PCRE2 regex via `fancy-regex` (lookahead, lookbehind, backreferences) |
+| `.iregexp` | ✔️ RFC 9485 interoperable regular expressions |
+| `.bitfield` | ✔️ Bitfield validation for unsigned integers (CBOR only) |
+
+You can activate features during validation as follows:
+
+```rust
+use cddl::validate_json_from_str;
+
+let cddl = r#"
+  v = JC<"v", 2>
+  JC<J, C> =  C .feature "cbor" / J .feature "json"
+"#;
+
+let json = r#""v""#;
+
+assert!(validate_json_from_str(cddl, json, Some(&["json"])).is_ok())
+```
+
+### Validating CSV
+
+```rust
+use cddl::validate_csv_from_str;
+
+let cddl = r#"person-file = [*person-record]
+person-record = [name: text, age: uint]"#;
+
+let csv = "Alice,30\nBob,25\n";
+
+assert!(validate_csv_from_str(cddl, csv, None, None).is_ok())
+```
+
+This crate implements CSV validation as described in [draft-bormann-cbor-cddl-csv-08](https://datatracker.ietf.org/doc/draft-bormann-cbor-cddl-csv/08/). CSV data is parsed according to [RFC 4180](https://datatracker.ietf.org/doc/html/rfc4180) and mapped to the CDDL generic data model:
+
+```cddl
+csv = [?header, *record]
+header = [+header-field]
+record = [+field]
+header-field = text
+field = text
+```
+
+Each row becomes an array of fields, and the entire CSV becomes an array of rows. Fields are text strings by default, but the validator coerces them to their JSON representation when the CDDL schema specifies application-level types such as `uint` , `int` , or `float` .
+
+The `has_header` parameter controls whether the first row is treated as a header row (kept as text strings without numeric coercion). When using the CLI, pass `--csv-header` to enable this.
+
+The first non-group rule in the CDDL definition determines the root type for validation, which should describe the entire CSV as an array of records.
+
+#### Comparing with JSON schema and JSON schema language
+
+[CDDL](https://tools.ietf.org/html/rfc8610), [JSON schema](https://json-schema.org/) and [JSON schema language](https://tools.ietf.org/html/draft-json-schema-language-02) can all be used to define JSON data structures. However, the approaches taken to develop each of these are vastly different. A good place to find past discussions on the differences between these formats is the [IETF mail archive](https://mailarchive.ietf.org/arch/), specifically in the JSON and CBOR lists. The purpose of this crate is not to argue for the use of CDDL over any one of these formats, but simply to provide an example implementation in Rust.
+
+### Validating CBOR
+
+```rust
+use cddl::validate_cbor_from_slice;
+
+let cddl = r#"rule = false"#;
+
+let cbor = b"\xF4";
+
+assert!(validate_cbor_from_slice(cddl, cbor).is_ok())
+```
+
+This crate also uses [Serde](https://serde.rs/) and [ciborium](https://crates.io/crates/ciborium) for validating CBOR data structures. CBOR validation is done via the loosely typed [ `ciborium::value::Value` ](https://github.com/enarx/ciborium/blob/main/ciborium/src/value/mod.rs#L22) enum. In addition to all of the same features implemented by the JSON validator, this crate also supports validating CBOR tags (e.g. `#6.32(tstr)` ), CBOR major types (e.g. `#1.2` ), table types (e.g. `{ [ + tstr ] => int }` ) and byte strings. The `.bits` , `.cbor` and `.cborseq` control operators are all supported as well.
+
+The following tags are supported when validating CBOR:
+
+| Tag                                      | Supported                                                                                                                                         |
+| ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `tdate = #6.0(tstr)` | <g-emoji class="g-emoji" alias="heavy_check_mark" fallback-src="https://github.githubassets.com/images/icons/emoji/unicode/2714.png">✔️</g-emoji> |
+| `time = #6.1(number)` | <g-emoji class="g-emoji" alias="heavy_check_mark" fallback-src="https://github.githubassets.com/images/icons/emoji/unicode/2714.png">✔️</g-emoji> |
+| `biguint = #6.2(bstr)` | <g-emoji class="g-emoji" alias="heavy_check_mark" fallback-src="https://github.githubassets.com/images/icons/emoji/unicode/2714.png">✔️</g-emoji> |
+| `bignint = #6.3(bstr)` | <g-emoji class="g-emoji" alias="heavy_check_mark" fallback-src="https://github.githubassets.com/images/icons/emoji/unicode/2714.png">✔️</g-emoji> |
+| `decfrac = #6.4([e10: int, m: integer])` | ✔️ |
+| `bigfloat = #6.5([e2: int, m: integer])` | ✔️ |
+| `eb64url = #6.21(any)` | <g-emoji class="g-emoji" alias="heavy_check_mark" fallback-src="https://github.githubassets.com/images/icons/emoji/unicode/2714.png">✔️</g-emoji> |
+| `eb64legacy = #6.22(any)` | <g-emoji class="g-emoji" alias="heavy_check_mark" fallback-src="https://github.githubassets.com/images/icons/emoji/unicode/2714.png">✔️</g-emoji> |
+| `eb16 = #6.23(any)` | <g-emoji class="g-emoji" alias="heavy_check_mark" fallback-src="https://github.githubassets.com/images/icons/emoji/unicode/2714.png">✔️</g-emoji> |
+| `encoded-cbor = #6.24(bstr)` | <g-emoji class="g-emoji" alias="heavy_check_mark" fallback-src="https://github.githubassets.com/images/icons/emoji/unicode/2714.png">✔️</g-emoji> |
+| `uri = #6.32(tstr)` | <g-emoji class="g-emoji" alias="heavy_check_mark" fallback-src="https://github.githubassets.com/images/icons/emoji/unicode/2714.png">✔️</g-emoji> |
+| `b64url = #6.33(tstr)` | <g-emoji class="g-emoji" alias="heavy_check_mark" fallback-src="https://github.githubassets.com/images/icons/emoji/unicode/2714.png">✔️</g-emoji> |
+| `b64legacy = #6.34(tstr)` | <g-emoji class="g-emoji" alias="heavy_check_mark" fallback-src="https://github.githubassets.com/images/icons/emoji/unicode/2714.png">✔️</g-emoji> |
+| `regexp = #6.35(tstr)` | <g-emoji class="g-emoji" alias="heavy_check_mark" fallback-src="https://github.githubassets.com/images/icons/emoji/unicode/2714.png">✔️</g-emoji> |
+| `mime-message = #6.36(tstr)` | <g-emoji class="g-emoji" alias="heavy_check_mark" fallback-src="https://github.githubassets.com/images/icons/emoji/unicode/2714.png">✔️</g-emoji> |
+| `cbor-any = #6.55799(any)` | <g-emoji class="g-emoji" alias="heavy_check_mark" fallback-src="https://github.githubassets.com/images/icons/emoji/unicode/2714.png">✔️</g-emoji> |
+
+If you've enabled the `additional-controls` feature, the control operators from RFC 9165 below are also available for use:
+
+| Control operator | Supported                                                                                                                                         |
+| ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `.plus` | <g-emoji class="g-emoji" alias="heavy_check_mark" fallback-src="https://github.githubassets.com/images/icons/emoji/unicode/2714.png">✔️</g-emoji> |
+| `.cat` | <g-emoji class="g-emoji" alias="heavy_check_mark" fallback-src="https://github.githubassets.com/images/icons/emoji/unicode/2714.png">✔️</g-emoji> |
+| `.det` | <g-emoji class="g-emoji" alias="heavy_check_mark" fallback-src="https://github.githubassets.com/images/icons/emoji/unicode/2714.png">✔️</g-emoji> |
+| `.abnf` | <g-emoji class="g-emoji" alias="heavy_check_mark" fallback-src="https://github.githubassets.com/images/icons/emoji/unicode/2714.png">✔️</g-emoji> |
+| `.abnfb` | <g-emoji class="g-emoji" alias="heavy_check_mark" fallback-src="https://github.githubassets.com/images/icons/emoji/unicode/2714.png">✔️</g-emoji> |
+| `.feature` | <g-emoji class="g-emoji" alias="heavy_check_mark" fallback-src="https://github.githubassets.com/images/icons/emoji/unicode/2714.png">✔️</g-emoji> |
+
+The text content control operators from RFC 9741 are also available for CBOR validation:
+
+| Control operator | Supported |
+| ---------------- | --------- |
+| `.b64u` / `.b64u-sloppy` | ✔️ |
+| `.b64c` / `.b64c-sloppy` | ✔️ |
+| `.hex` / `.hexlc` / `.hexuc` | ✔️ |
+| `.b32` / `.h32` | ✔️ |
+| `.b45` | ✔️ |
+| `.base10` | ✔️ |
+| `.printf` | ✔️ |
+| `.json` | ✔️ |
+| `.join` | ✔️ |
+
+If you've enabled the `freezer` feature, the CDDL Feature Freezer operators are also available:
+
+| Control operator | Supported |
+| ---------------- | --------- |
+| `.pcre` | ✔️ PCRE2 regex via `fancy-regex` |
+| `.iregexp` | ✔️ RFC 9485 interoperable regular expressions |
+| `.bitfield` | ✔️ Bitfield width validation for uints |
+
+You can activate features during validation by passing a slice of feature strings as follows:
+
+```rust
+use cddl::validate_cbor_from_slice;
+
+let cddl = r#"
+  v = JC<"v", 2>
+  JC<J, C> =  C .feature "cbor" / J .feature "json"
+"#;
+
+let cbor = b"\x02";
+
+assert!(validate_cbor_from_slice(cddl, cbor, Some(&["cbor"])).is_ok())
+```
+
+## `no_std` support
+
+The lexer and parser can be used in a `no_std` context (including bare-metal targets such as `thumbv7em-none-eabihf`) provided that a heap allocator is available. This is enabled by opting out of the default features in your `Cargo.toml` file:
+
+```toml
+[dependencies]
+cddl = { version = "0.10.7", default-features = false }
+```
+
+When the `std` feature is disabled, the crate declares `#![no_std]` and relies on `core` and `alloc` only. All std-only dependencies (codespan-reporting, hexf-parse, regex, simplelog, log, pest_vm, pest_meta, abnf_to_pest) are gated behind the `std` feature flag and will not be compiled.
+
+Zero-copy parsing is implemented to the extent that is possible. Allocation is required for error handling, diagnostics, and AST construction.
+
+Note: hexadecimal float literals (`hexfloat`) are not supported in `no_std` mode since they depend on the `hexf-parse` crate which requires `std`.
+
+JSON, CBOR, and CSV validation are dependent on their respective heap allocated `Value` types, but since these types aren't supported in a `no_std` context, they subsequently aren't supported by this crate in `no_std`.

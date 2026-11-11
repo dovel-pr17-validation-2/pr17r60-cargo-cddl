@@ -1,0 +1,16 @@
+.devcontainer/
+.git/
+.github/
+.gitignore
+.rustfmt.toml
+Cargo.lock
+dep-graph.png
+LICENSE
+pkg/
+README.md
+tests/
+target/
+www/
+Dockerfile
+cddl-lsp/
+pkg/

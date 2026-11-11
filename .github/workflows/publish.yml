@@ -1,0 +1,270 @@
+name: Publish packages
+permissions:
+  contents: write
+  pull-requests: write
+  packages: write
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+jobs:
+  publish-binaries:
+    name: Build and publish binaries
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macOS-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    if: contains(github.ref, 'vscode-extension') != true
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust
+        run: |
+          rustup update
+
+      - name: Build CLI
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          cargo b --release --bin cddl
+          cp target/release/cddl cddl-linux-amd64
+          chmod +x cddl-linux-amd64
+          tar -czvf cddl-linux-amd64.tar.gz cddl-linux-amd64
+
+      - name: Build CLI
+        if: matrix.os == 'macOS-latest'
+        run: |
+          cargo b --release --bin cddl
+          cp target/release/cddl cddl-darwin-amd64
+          chmod +x cddl-darwin-amd64
+          zip cddl-darwin-amd64.zip cddl-darwin-amd64
+
+      - name: Build CLI
+        if: matrix.os == 'windows-latest'
+        shell: powershell
+        run: |
+          cargo b --release --bin cddl
+          cp target\release\cddl.exe cddl-windows-amd64.exe
+          Compress-Archive -Path .\cddl-windows-amd64.exe -DestinationPath cddl-windows-amd64.zip
+
+      - name: Get latest release tag
+        id: get_latest_tag
+        uses: ./.github/actions/get-latest-release-tag
+
+      - name: Upload binary asset
+        if: matrix.os == 'ubuntu-latest'
+        uses: svenstaro/upload-release-action@v2
+        with:
+          repo_token: ${{ secrets.GITHUB_TOKEN }}
+          file: ./cddl-linux-amd64.tar.gz
+          asset_name: cddl-linux-amd64.tar.gz
+          overwrite: true
+          tag: ${{ steps.get_latest_tag.outputs.latest_tag }}
+
+      - name: Upload binary asset
+        if: matrix.os == 'windows-latest'
+        uses: svenstaro/upload-release-action@v2
+        with:
+          repo_token: ${{ secrets.GITHUB_TOKEN }}
+          file: ./cddl-windows-amd64.zip
+          asset_name: cddl-windows-amd64.zip
+          overwrite: true
+          tag: ${{ steps.get_latest_tag.outputs.latest_tag }}
+
+      - name: Upload binary asset
+        if: matrix.os == 'macOS-latest'
+        uses: svenstaro/upload-release-action@v2
+        with:
+          repo_token: ${{ secrets.GITHUB_TOKEN }}
+          file: ./cddl-darwin-amd64.zip
+          asset_name: cddl-darwin-amd64.zip
+          overwrite: true
+          tag: ${{ steps.get_latest_tag.outputs.latest_tag }}
+
+  publish-docker:
+    name: Publish Docker
+    runs-on: ubuntu-latest
+    if: contains(github.ref, 'vscode-extension') != true
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Get latest release tag
+        id: get_latest_tag
+        uses: ./.github/actions/get-latest-release-tag
+
+      - name: Docker meta
+        id: docker_meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/anweiss/cddl-cli
+          tags: |
+            type=raw,value=${{ steps.get_latest_tag.outputs.docker_tag }}
+            type=raw,value=latest
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Login to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.docker_meta.outputs.tags }}
+          cache-from: type=local,src=/tmp/.buildx-cache
+          cache-to: type=local,dest=/tmp/.buildx-cache
+
+  publish-npm:
+    name: Publish npm
+    runs-on: ubuntu-latest
+    if: contains(github.ref, 'vscode-extension') != true
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v7
+
+      - name: Install Rust
+        run: |
+          rustup update
+          rustup target add wasm32-unknown-unknown
+
+      - name: Install Node.js
+        uses: actions/setup-node@1d0ff469b7ec7b3cb9d8673fde0c81c44821de2a
+        with:
+          node-version: '24'
+          registry-url: https://npm.pkg.github.com
+          scope: '@anweiss'
+
+      - name: Install wasmpack
+        run: |
+          cargo install wasm-pack --version 0.15.0 --locked
+
+      - name: Build wasm default features
+        run: |
+          wasm-pack build --target nodejs --scope anweiss --release
+
+      - name: Build wasm lsp feature
+        run: |
+          wasm-pack build --target nodejs --scope anweiss --release --out-dir cddl-languageserver -- --features lsp
+          sed -i -e 's/"name": "@anweiss\/cddl"/"name": "@anweiss\/cddl-languageserver"/g' cddl-languageserver/package.json
+
+      - name: Publish to GPR
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Publish the main package
+          cd pkg
+          PKG_VERSION=$(node -p "require('./package.json').version")
+          echo "Attempting to publish @anweiss/cddl@${PKG_VERSION}"
+          if OUTPUT=$(npm publish --access=public 2>&1); then
+            echo "$OUTPUT"
+          else
+            if echo "$OUTPUT" | grep -qE "409 Conflict|cannot publish over the previously published version"; then
+              echo "Package @anweiss/cddl@${PKG_VERSION} already exists, skipping"
+            else
+              echo "$OUTPUT" >&2
+              exit 1
+            fi
+          fi
+
+          # Publish the language server package
+          cd ../cddl-languageserver
+          LSP_VERSION=$(node -p "require('./package.json').version")
+          echo "Attempting to publish @anweiss/cddl-languageserver@${LSP_VERSION}"
+          if OUTPUT=$(npm publish --access=public 2>&1); then
+            echo "$OUTPUT"
+          else
+            if echo "$OUTPUT" | grep -qE "409 Conflict|cannot publish over the previously published version"; then
+              echo "Package @anweiss/cddl-languageserver@${LSP_VERSION} already exists, skipping"
+            else
+              echo "$OUTPUT" >&2
+              exit 1
+            fi
+          fi
+
+  publish-crate:
+    name: Publish crate
+    strategy:
+      matrix:
+        rust_toolchain: [stable]
+    runs-on: ubuntu-latest
+    if: contains(github.ref, 'vscode-extension') != true
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v7
+
+      - name: Install Rust
+        run: |
+          rustup update
+          rustup install ${{ matrix.rust_toolchain }}
+
+      - name: Login to crates.io
+        run: |
+          cargo login ${{ secrets.CratesIOToken }}
+
+      - name: Publish workspace crates
+        run: |
+          # Publish in dependency order, including on retries after a partial release.
+          for MANIFEST in Cargo.toml cddl-codegen-rust/Cargo.toml cddl-derive/Cargo.toml; do
+            PACKAGE=$(grep -m 1 '^name' "$MANIFEST" | sed 's/.*"\(.*\)".*/\1/')
+            VERSION=$(grep -m 1 '^version' "$MANIFEST" | sed 's/.*"\(.*\)".*/\1/')
+            STATUS=$(curl --silent --show-error --location --output /dev/null --write-out '%{http_code}' \
+              "https://crates.io/api/v1/crates/$PACKAGE/$VERSION")
+
+            case "$STATUS" in
+              200) echo "$PACKAGE@$VERSION already exists on crates.io, skipping publish" ;;
+              404) cargo publish --manifest-path "$MANIFEST" ;;
+              *) echo "Failed to check $PACKAGE@$VERSION on crates.io (HTTP $STATUS)" >&2; exit 1 ;;
+            esac
+          done
+
+  publish-website:
+    name: Publish website
+    runs-on: ubuntu-latest
+    if: contains(github.ref, 'vscode-extension') != true
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v7
+
+      - name: Install Rust
+        run: |
+          rustup update
+          rustup target add wasm32-unknown-unknown
+
+      - name: Install wasmpack
+        run: |
+          cargo install wasm-pack --version 0.15.0 --locked
+
+      - name: Install node
+        uses: actions/setup-node@1d0ff469b7ec7b3cb9d8673fde0c81c44821de2a
+        with:
+          node-version: '24'
+
+      - name: Build wasm
+        run: |
+          wasm-pack build --release
+
+      - name: Build web
+        run: |
+          cd www
+          npm ci
+          npm run build
+
+      - name: Deploy web
+        uses: JamesIves/github-pages-deploy-action@fa24774553152dd7873cd16ebd8d959b010c5445
+        with:
+          branch: gh-pages
+          folder: www/dist

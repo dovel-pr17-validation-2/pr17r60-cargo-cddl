@@ -1,0 +1,44 @@
+{
+  "name": "cddl",
+  "version": "0.10.7",
+  "description": "Parser for the Concise data definition language (CDDL)",
+  "main": "index.js",
+  "scripts": {
+    "wasm-build": "cd .. && wasm-pack build --target web --out-dir pkg -- --locked",
+    "prebuild": "npm run wasm-build",
+    "build": "webpack --config webpack.config.prod.js",
+    "prestart": "npm run wasm-build",
+    "start": "node ../scripts/dev.mjs"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/anweiss/cddl.git"
+  },
+  "keywords": [
+    "webassembly",
+    "wasm",
+    "rust",
+    "webpack"
+  ],
+  "author": "Andrew Weiss <andrew.weiss@outlook.com>",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/anweiss/cddl/issues"
+  },
+  "homepage": "https://anweiss.github.io/cddl",
+  "dependencies": {
+    "monaco-editor-webpack-plugin": "^7.1.1"
+  },
+  "devDependencies": {
+    "css-loader": "^7.1.5",
+    "html-webpack-plugin": "^5.6.8",
+    "monaco-editor": "^0.57.0",
+    "style-loader": "^4.0.0",
+    "webpack": "^5.112.2",
+    "webpack-cli": "^7.2.3"
+  },
+  "overrides": {
+    "serialize-javascript": "^7.0.5",
+    "dompurify": "^3.4.17"
+  }
+}

@@ -1,0 +1,298 @@
+use super::{ast::*, error::ErrorMsg, pest_bridge};
+
+#[cfg(feature = "ast-span")]
+use super::lexer::Position;
+
+use core::result;
+
+#[cfg(all(feature = "std", not(target_arch = "wasm32")))]
+use codespan_reporting::{
+  diagnostic::{Diagnostic, Label},
+  files::SimpleFiles,
+  term,
+  term::termcolor::{ColorChoice, StandardStream},
+};
+use displaydoc::Display;
+
+#[cfg(not(feature = "std"))]
+use alloc::string::{String, ToString};
+
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen::prelude::*;
+
+#[cfg(target_arch = "wasm32")]
+use serde::Serialize;
+
+/// Alias for `Result` with an error of type `cddl::parser::Error`
+pub type Result<T> = result::Result<T, Error>;
+
+/// Parsing error types
+#[derive(Debug, Display)]
+pub enum Error {
+  /// Parsing errors
+  #[displaydoc("{0}")]
+  CDDL(String),
+  #[cfg_attr(
+    feature = "ast-span",
+    displaydoc("parsing error: position {position:?}, msg: {msg}")
+  )]
+  #[cfg_attr(not(feature = "ast-span"), displaydoc("parsing error: msg: {msg}"))]
+  /// Parsing error occurred
+  PARSER {
+    /// Error position
+    #[cfg(feature = "ast-span")]
+    position: Position,
+    /// Error message
+    msg: ErrorMsg,
+  },
+  /// Regex error
+  #[cfg(feature = "std")]
+  #[displaydoc("regex parsing error: {0}")]
+  REGEX(regex::Error),
+}
+
+#[cfg(feature = "std")]
+impl std::error::Error for Error {}
+
+/// Returns a `ast::CDDL` from a `&str`
+///
+/// # Arguments
+///
+/// * `input` - A string slice with the CDDL text input
+/// * `print_stderr` - When true, print any errors to stderr
+///
+/// # Example
+///
+/// ```
+/// use cddl::parser::cddl_from_str;
+///
+/// let input = r#"myrule = int"#;
+/// let _ = cddl_from_str(input, true);
+#[cfg(feature = "std")]
+#[cfg(not(target_arch = "wasm32"))]
+pub fn cddl_from_str(input: &str, print_stderr: bool) -> std::result::Result<CDDL<'_>, String> {
+  pest_bridge::cddl_from_pest_str(input).map_err(|e| {
+    if print_stderr {
+      report_pest_error(&e, input);
+    }
+    e.to_string()
+  })
+}
+
+/// Returns a `ast::CDDL` from a `&str` (no_std version, no stderr output)
+#[cfg(not(feature = "std"))]
+#[cfg(not(target_arch = "wasm32"))]
+pub fn cddl_from_str(input: &str, _print_stderr: bool) -> core::result::Result<CDDL<'_>, String> {
+  pest_bridge::cddl_from_pest_str(input).map_err(|e| e.to_string())
+}
+
+/// Print a pest parser error to stderr with codespan diagnostics
+#[cfg(all(feature = "std", not(target_arch = "wasm32")))]
+fn report_pest_error(error: &Error, input: &str) {
+  if let Error::PARSER {
+    #[cfg(feature = "ast-span")]
+    position,
+    msg,
+  } = error
+  {
+    let mut files = SimpleFiles::new();
+    let file_id = files.add("input", input);
+
+    let label_message = msg.to_string();
+
+    let label = {
+      #[cfg(feature = "ast-span")]
+      {
+        Label::primary(file_id, position.range.0..position.range.1).with_message(label_message)
+      }
+      #[cfg(not(feature = "ast-span"))]
+      {
+        Label::primary(file_id, 0..0).with_message(label_message)
+      }
+    };
+
+    let mut diagnostic = Diagnostic::error()
+      .with_message("parser errors")
+      .with_labels(vec![label]);
+
+    if let Some(ref extended) = msg.extended {
+      diagnostic = diagnostic.with_notes(vec![extended.clone()]);
+    }
+
+    let config = term::Config::default();
+    let writer = StandardStream::stderr(ColorChoice::Auto);
+    let _ = term::emit_to_io_write(&mut writer.lock(), &config, &files, &diagnostic);
+  }
+}
+
+impl CDDL<'_> {
+  /// Parses CDDL from a byte slice.
+  ///
+  /// This performs both syntactic parsing and semantic validation, including
+  /// checking that all referenced type/group names are defined.
+  #[cfg(feature = "std")]
+  #[cfg(not(target_arch = "wasm32"))]
+  pub fn from_slice(input: &[u8]) -> std::result::Result<CDDL<'_>, String> {
+    let str_input = std::str::from_utf8(input).map_err(|e| e.to_string())?;
+    pest_bridge::cddl_from_pest_str_checked(str_input).map_err(|e| {
+      report_pest_error(&e, str_input);
+      e.to_string()
+    })
+  }
+}
+
+/// Returns a `ast::CDDL` wrapped in `JsValue` from a `&str`
+///
+/// # Arguments
+///
+/// * `input` - A string slice with the CDDL text input
+///
+/// # Example
+///
+/// ```typescript
+/// import * as wasm from 'cddl';
+///
+/// let cddl: any;
+/// try {
+///   cddl = wasm.cddl_from_str(text);
+/// } catch (e) {
+///   console.error(e);
+/// }
+/// ```
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+pub fn cddl_from_str(input: &str) -> result::Result<JsValue, JsValue> {
+  #[derive(Serialize)]
+  struct ParserError {
+    #[cfg(feature = "ast-span")]
+    position: Position,
+    msg: ErrorMsg,
+  }
+
+  match pest_bridge::cddl_from_pest_str(input) {
+    Ok(c) => serde_wasm_bindgen::to_value(&c).map_err(|e| JsValue::from(e.to_string())),
+    Err(Error::PARSER {
+      #[cfg(feature = "ast-span")]
+      position,
+      msg,
+    }) => {
+      let errors = vec![ParserError {
+        #[cfg(feature = "ast-span")]
+        position,
+        msg,
+      }];
+      Err(serde_wasm_bindgen::to_value(&errors).map_err(|e| JsValue::from(e.to_string()))?)
+    }
+    Err(e) => Err(JsValue::from(e.to_string())),
+  }
+}
+
+/// Validate CDDL input with partial compilation support.
+///
+/// Unlike `cddl_from_str` which stops at the first error, this function
+/// performs partial compilation: when the full document parse fails, it splits
+/// the source into individual top-level rule blocks and parses each one
+/// independently, collecting **all** errors across the entire document.
+///
+/// When `check_refs` is `true`, the function also checks for undefined
+/// references — names used in type expressions or group entries that are not
+/// defined by any rule in the document and are not standard prelude types.
+/// These are reported as warnings rather than errors.
+///
+/// Returns a `JsValue` (serialised JSON array) containing all diagnostics found.
+/// Each entry has `{ position, msg, severity }` where severity is `"error"` or `"warning"`.
+/// An empty array means the input is valid CDDL with no warnings.
+///
+/// # Example
+///
+/// ```typescript
+/// import * as wasm from 'cddl';
+///
+/// const errors = wasm.validate_cddl_from_str(text, true);
+/// // errors is an Array<{ position, msg, severity }>
+/// if (errors.length === 0) {
+///   console.log('Valid CDDL');
+/// }
+/// ```
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+pub fn validate_cddl_from_str(input: &str, check_refs: bool) -> result::Result<JsValue, JsValue> {
+  let errors = pest_bridge::validate_cddl(input, check_refs);
+  serde_wasm_bindgen::to_value(&errors).map_err(|e| JsValue::from(e.to_string()))
+}
+
+/// Formats CDDL from input string
+#[cfg(feature = "lsp")]
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+pub fn format_cddl_from_str(input: &str) -> result::Result<String, JsValue> {
+  #[derive(Serialize)]
+  struct ParserError {
+    #[cfg(feature = "ast-span")]
+    position: Position,
+    msg: ErrorMsg,
+  }
+
+  match pest_bridge::cddl_from_pest_str(input) {
+    Ok(c) => Ok(c.to_string()),
+    Err(Error::PARSER {
+      #[cfg(feature = "ast-span")]
+      position,
+      msg,
+    }) => {
+      let errors = vec![ParserError {
+        #[cfg(feature = "ast-span")]
+        position,
+        msg,
+      }];
+      Err(serde_wasm_bindgen::to_value(&errors).map_err(|e| JsValue::from(e.to_string()))?)
+    }
+    Err(e) => Err(JsValue::from(e.to_string())),
+  }
+}
+
+/// Identify root type name from CDDL input string
+#[cfg(feature = "std")]
+#[cfg(not(target_arch = "wasm32"))]
+pub fn root_type_name_from_cddl_str(input: &str) -> std::result::Result<String, String> {
+  let cddl = cddl_from_str(input, false)?;
+
+  for r in cddl.rules.iter() {
+    // First type rule is root
+    if let Rule::Type { rule, .. } = r {
+      if rule.generic_params.is_none() {
+        return Ok(rule.name.to_string());
+      }
+    }
+  }
+
+  Err("cddl spec contains no root type".to_string())
+}
+
+#[cfg(test)]
+#[cfg(feature = "std")]
+#[cfg(not(target_arch = "wasm32"))]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn test_cddl_from_str_basic() {
+    let input = "myrule = int\n";
+    let result = cddl_from_str(input, false);
+    assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+  }
+
+  #[test]
+  fn test_multiple_rules_with_reference_to_parenthesized_type() {
+    let input = "basic = int\nouter = (basic)\n";
+    let result = cddl_from_str(input, false);
+    assert!(result.is_ok(), "Parser errors: {:?}", result.err());
+
+    let cddl = result.unwrap();
+    assert_eq!(cddl.rules.len(), 2);
+
+    let rule_names: Vec<_> = cddl.rules.iter().map(|r| r.name()).collect();
+    assert!(rule_names.contains(&"basic".to_string()));
+    assert!(rule_names.contains(&"outer".to_string()));
+  }
+}

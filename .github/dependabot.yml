@@ -1,0 +1,48 @@
+version: 2
+updates:
+  - package-ecosystem: 'cargo'
+    directory: '/'
+    schedule:
+      interval: 'weekly'
+    cooldown:
+      default-days: 7
+  - package-ecosystem: 'npm'
+    directory: '/'
+    schedule:
+      interval: 'weekly'
+    cooldown:
+      default-days: 7
+  - package-ecosystem: 'npm'
+    directory: '/www'
+    schedule:
+      interval: 'weekly'
+    cooldown:
+      default-days: 7
+  - package-ecosystem: 'npm'
+    directory: '/cddl-lsp'
+    schedule:
+      interval: 'weekly'
+    cooldown:
+      default-days: 7
+  - package-ecosystem: 'npm'
+    directory: '/cddl-lsp/client'
+    schedule:
+      interval: 'weekly'
+    cooldown:
+      default-days: 7
+  - package-ecosystem: 'npm'
+    directory: '/cddl-lsp/server'
+    schedule:
+      interval: 'weekly'
+    cooldown:
+      default-days: 7
+  - package-ecosystem: 'pip'
+    directory: '/'
+    schedule:
+      interval: 'weekly'
+    cooldown:
+      default-days: 7
+  - package-ecosystem: 'github-actions'
+    directory: '/'
+    schedule:
+      interval: 'weekly'

@@ -1,0 +1,52 @@
+name: Compilation check
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  compilation-check:
+    strategy:
+      matrix:
+        rust_toolchain: [stable]
+        os: [ubuntu-latest, macOS-latest, windows-latest]
+    name: Compilation check
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v7
+
+      - name: Install Rust
+        env:
+          RUST_TOOLCHAIN: ${{ matrix.rust_toolchain }}
+        run: |
+          rustup update
+          rustup install "$RUST_TOOLCHAIN"
+
+      - name: Check compilation with default features
+        env:
+          RUST_TOOLCHAIN: ${{ matrix.rust_toolchain }}
+        run: |
+          cargo "+$RUST_TOOLCHAIN" check --all --bins --examples --tests
+
+      - name: Install thumbv7em-none-eabihf target
+        env:
+          RUST_TOOLCHAIN: ${{ matrix.rust_toolchain }}
+        run: rustup target add thumbv7em-none-eabihf --toolchain "$RUST_TOOLCHAIN"
+
+      - name: Check compilation with no features
+        env:
+          RUST_TOOLCHAIN: ${{ matrix.rust_toolchain }}
+        run: |
+          cargo "+$RUST_TOOLCHAIN" check -p cddl --lib --no-default-features --features _build-parser --target thumbv7em-none-eabihf
+
+      - name: Check compilation with no default features (ast-span)
+        env:
+          RUST_TOOLCHAIN: ${{ matrix.rust_toolchain }}
+        run: |
+          cargo "+$RUST_TOOLCHAIN" check --locked -p cddl --lib --no-default-features --features ast-span,_build-parser --target thumbv7em-none-eabihf
